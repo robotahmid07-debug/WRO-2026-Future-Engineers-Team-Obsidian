@@ -14,6 +14,7 @@ class PiPins:
     # I2C for BNO086 and other sensors (I2C1)
     I2C_SDA = 2    # Physical pin 3
     I2C_SCL = 3    # Physical pin 5
+    MODE_SELECT = 22
     # USB is used for HuskyLens and RPLIDAR C1 (via USB serial)
 
 
