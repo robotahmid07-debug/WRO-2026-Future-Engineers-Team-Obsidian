@@ -1,1 +1,8 @@
-
+pyyaml>=6.0
+pyserial>=3.5
+rplidar>=1.0.0
+smbus2>=0.4.2
+bno055>=1.0.1
+pyhuskylens>=0.1.0   
+pytest>=7.0
+flake8>=6.0
