@@ -1,7 +1,7 @@
 """
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
-Orchestrates all subsystems. 
-Now reads turn direction dynamically from YAML config.
+Supports both Open and Obstacle challenges via nested YAML config.
+Uses Ackermann steering geometry.
 """
 
 import time
@@ -10,7 +10,7 @@ import logging
 from enum import Enum
 from typing import Optional, List, Tuple
 
-from .config_parser import SystemConfig
+from .config_parser import SystemConfig, ChallengeConfig
 from .localization import Localization
 from .vision_tracker import HuskyLensReader, ColorBlock
 from .lidar_fusion import LidarFusion
@@ -32,8 +32,7 @@ class RobotState(Enum):
 class StateMachine:
     """
     Main state machine for WRO Future Engineers 2026.
-    Uses Ackermann steering geometry.
-    All color-to-steering mappings are pulled from the YAML config.
+    Uses Ackermann steering. Config-driven for both challenges.
     """
 
     # Color ID mapping (learned on HuskyLens V2)
@@ -43,7 +42,15 @@ class StateMachine:
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
                  spatial_map: SpatialMap, emergency_shield: EmergencyShield,
-                 steering: SteeringController, parking: ParkingController):
+                 steering: SteeringController, parking: ParkingController,
+                 challenge: str = "open"):
+        """
+        Initialize the state machine.
+
+        Args:
+            config: Parsed SystemConfig object.
+            challenge: "open" or "obstacle" - selects which challenge mode to run.
+        """
         self.config = config
         self.serial_bridge = serial_bridge
         self.localization = localization
@@ -54,17 +61,30 @@ class StateMachine:
         self.steering = steering
         self.parking = parking
 
+        # Select active challenge config from nested YAML
+        self.challenge = challenge.lower()
+        if self.challenge == "open":
+            self.active_config: ChallengeConfig = config.zone_management.open_challenge
+        elif self.challenge == "obstacle":
+            self.active_config = config.zone_management.obstacle_challenge
+        else:
+            raise ValueError(f"Invalid challenge: {challenge}. Must be 'open' or 'obstacle'.")
+
+        # Determine if this is open challenge (no parking) or obstacle (parking)
+        self.is_open_challenge = not self.active_config.use_parking_slot
+
+        # State tracking
         self.state = RobotState.INIT
         self.lap_count = 0
-        self.is_open_challenge = not config.zone_management.use_parking_slot
-
-        # For lap counting
         self.lap_start_pose = None
         self.track_length_estimate = 5.0  # meters per lap (calibrate)
 
         # Navigation constants
         self.BASE_SPEED = 0.3  # m/s
         self.STEER_MAGNITUDE = 0.3  # rad/s (yaw rate magnitude when turning)
+
+        logger.info(f"StateMachine initialized with challenge: {self.challenge} "
+                    f"(Open: {self.is_open_challenge})")
 
     def run(self):
         """Main loop; call at ~20-50 Hz."""
@@ -85,11 +105,11 @@ class StateMachine:
         """Initialize robot state: register pose, reset counters."""
         logger.info("State: INIT")
 
-        # Register start pose
+        # Register start pose (always done)
         self.localization.register_start_pose()
         self.lap_start_pose = self.localization.get_pose()
 
-        # Register parking slot if obstacle challenge
+        # Register parking slot ONLY if obstacle challenge
         if not self.is_open_challenge:
             self.localization.register_parking_slot()
             parking_geometry = self.localization.parking_bay_geometry
@@ -114,30 +134,21 @@ class StateMachine:
         - Positive angular velocity = Turn LEFT
         - Negative angular velocity = Turn RIGHT
 
-        Args:
-            color_id: The color ID detected by HuskyLens.
-
         Returns:
             Angular velocity in rad/s. 0.0 if color is unknown or should go straight.
         """
-        # Get the pass side from config
         if color_id == self.COLOR_RED:
             pass_side = self.config.traffic_light_passing_rules.RED_BLOCK_PASS_SIDE.upper()
         elif color_id == self.COLOR_GREEN:
             pass_side = self.config.traffic_light_passing_rules.GREEN_BLOCK_PASS_SIDE.upper()
         else:
-            # Unknown color -> go straight
             return 0.0
 
-        # Map side to angular velocity sign
         if pass_side == "RIGHT":
-            # Turning RIGHT means negative angular velocity
             return -self.STEER_MAGNITUDE
         elif pass_side == "LEFT":
-            # Turning LEFT means positive angular velocity
             return self.STEER_MAGNITUDE
         else:
-            # Invalid string in config? Default to straight.
             logger.warning(f"Invalid pass side '{pass_side}' in config. Defaulting to straight.")
             return 0.0
 
@@ -187,7 +198,6 @@ class StateMachine:
         # 6. Determine target and steering (fully config-driven)
         if confirmed_objects:
             target = confirmed_objects[0]  # Sorted by distance
-            # Get angular velocity from YAML config
             angular = self._get_angular_velocity_from_color(target.color_id)
             logger.debug(f"Color ID {target.color_id} -> angular = {angular:.2f} rad/s")
         else:
@@ -217,7 +227,7 @@ class StateMachine:
     def _update_lap_count(self):
         """
         Update lap count based on odometry.
-        In production, use wall detection or line crossing.
+        In production, use wall detection or line crossing for better accuracy.
         """
         pose = self.localization.get_pose()
 
