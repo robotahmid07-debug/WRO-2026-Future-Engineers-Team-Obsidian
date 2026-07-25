@@ -1,1 +1,18 @@
+[Unit]
+Description=WRO Future Engineers 2026 Robot Control
+After=network.target local-fs.target multi-user.target
+Wants=network.target
 
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/wro_future_engineers_2026
+ExecStart=/home/pi/wro_future_engineers_2026/venv/bin/python3 /home/pi/wro_future_engineers_2026/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
