@@ -1,6 +1,7 @@
 """
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
-Orchestrates all subsystems. Updated for Ackermann steering.
+Orchestrates all subsystems. 
+Now reads turn direction dynamically from YAML config.
 """
 
 import time
@@ -32,6 +33,7 @@ class StateMachine:
     """
     Main state machine for WRO Future Engineers 2026.
     Uses Ackermann steering geometry.
+    All color-to-steering mappings are pulled from the YAML config.
     """
 
     # Color ID mapping (learned on HuskyLens V2)
@@ -62,7 +64,7 @@ class StateMachine:
 
         # Navigation constants
         self.BASE_SPEED = 0.3  # m/s
-        self.STEER_GAIN = 0.5
+        self.STEER_MAGNITUDE = 0.3  # rad/s (yaw rate magnitude when turning)
 
     def run(self):
         """Main loop; call at ~20-50 Hz."""
@@ -102,6 +104,42 @@ class StateMachine:
         # Transition to NAVIGATE
         self.state = RobotState.NAVIGATE
         logger.info("Transition to NAVIGATE")
+
+    def _get_angular_velocity_from_color(self, color_id: int) -> float:
+        """
+        Determines the angular velocity (yaw rate) based on the color ID
+        and the pass-side rules defined in the YAML config.
+
+        Convention:
+        - Positive angular velocity = Turn LEFT
+        - Negative angular velocity = Turn RIGHT
+
+        Args:
+            color_id: The color ID detected by HuskyLens.
+
+        Returns:
+            Angular velocity in rad/s. 0.0 if color is unknown or should go straight.
+        """
+        # Get the pass side from config
+        if color_id == self.COLOR_RED:
+            pass_side = self.config.traffic_light_passing_rules.RED_BLOCK_PASS_SIDE.upper()
+        elif color_id == self.COLOR_GREEN:
+            pass_side = self.config.traffic_light_passing_rules.GREEN_BLOCK_PASS_SIDE.upper()
+        else:
+            # Unknown color -> go straight
+            return 0.0
+
+        # Map side to angular velocity sign
+        if pass_side == "RIGHT":
+            # Turning RIGHT means negative angular velocity
+            return -self.STEER_MAGNITUDE
+        elif pass_side == "LEFT":
+            # Turning LEFT means positive angular velocity
+            return self.STEER_MAGNITUDE
+        else:
+            # Invalid string in config? Default to straight.
+            logger.warning(f"Invalid pass side '{pass_side}' in config. Defaulting to straight.")
+            return 0.0
 
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and Ackermann control."""
@@ -146,23 +184,12 @@ class StateMachine:
         # 5. Get confirmed objects
         confirmed_objects = self.spatial_map.get_confirmed_objects()
 
-        # 6. Determine target and steering
+        # 6. Determine target and steering (fully config-driven)
         if confirmed_objects:
             target = confirmed_objects[0]  # Sorted by distance
-
-            # Determine angular velocity based on color
-            if target.color_id == self.COLOR_RED:
-                angular = 0.3   # steer right (positive = left turn? Actually positive = left in our convention)
-                # Wait! In our Ackermann steering, positive angular means turn left.
-                # The config says RED_BLOCK_PASS_SIDE = "RIGHT" -> we must steer RIGHT.
-                # So we need negative angular velocity.
-                angular = -0.3
-                logger.debug("RED detected -> steering right (negative angular)")
-            elif target.color_id == self.COLOR_GREEN:
-                angular = 0.3   # GREEN -> pass LEFT -> steer left (positive angular)
-                logger.debug("GREEN detected -> steering left (positive angular)")
-            else:
-                angular = 0.0
+            # Get angular velocity from YAML config
+            angular = self._get_angular_velocity_from_color(target.color_id)
+            logger.debug(f"Color ID {target.color_id} -> angular = {angular:.2f} rad/s")
         else:
             angular = 0.0
 
@@ -179,7 +206,6 @@ class StateMachine:
         # 8. Update localization with Ackermann kinematics
         # Compute steering angle from angular velocity for odometry
         if abs(linear) > 0.001:
-            # delta = atan2(angular * L, v)
             steering_angle = math.atan2(angular * self.steering.wheelbase, linear)
         else:
             steering_angle = 0.0
