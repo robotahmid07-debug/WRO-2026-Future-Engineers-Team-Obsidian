@@ -1,6 +1,6 @@
 """
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
-Orchestrates all subsystems.
+Orchestrates all subsystems. Updated for Ackermann steering.
 """
 
 import time
@@ -31,16 +31,10 @@ class RobotState(Enum):
 class StateMachine:
     """
     Main state machine for WRO Future Engineers 2026.
-
-    States:
-    - INIT: Register start pose, parking geometry, reset lap counter
-    - NAVIGATE: Run spatial tracking, emergency shield, steering control
-    - TERMINATION: Open challenge -> return to start; Obstacle -> parallel parking
-    - EMERGENCY_STOP: Stop and wait for manual reset
+    Uses Ackermann steering geometry.
     """
 
     # Color ID mapping (learned on HuskyLens V2)
-    # These IDs are assigned when colors are learned[reference:15]
     COLOR_RED = 1
     COLOR_GREEN = 2
 
@@ -110,7 +104,7 @@ class StateMachine:
         logger.info("Transition to NAVIGATE")
 
     def _navigate_state(self):
-        """Main navigation loop with sensor fusion and control."""
+        """Main navigation loop with sensor fusion and Ackermann control."""
         # 1. Update emergency shield
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
@@ -136,13 +130,13 @@ class StateMachine:
             range_m = self.lidar.get_range_in_sector(angle_deg, 5.0)
 
             if range_m is not None and range_m > 0.1:
-                # Compute local coordinates
+                # Compute local coordinates (forward = x, left = y)
                 angle_rad = math.radians(angle_deg)
                 x_local = range_m * math.cos(angle_rad)
                 y_local = range_m * math.sin(angle_rad)
 
-                # Check if this is a valid detection
-                if x_local > 0:  # Only forward detections
+                # Only forward detections
+                if x_local > 0:
                     detections.append((color_block.color_id, x_local, y_local))
 
         # Update spatial map with detections
@@ -154,43 +148,44 @@ class StateMachine:
 
         # 6. Determine target and steering
         if confirmed_objects:
-            # Get closest confirmed object
             target = confirmed_objects[0]  # Sorted by distance
 
-            # Determine steering based on color
-            # RED_BLOCK_PASS_SIDE: "RIGHT" -> steer right (positive angular)
-            # GREEN_BLOCK_PASS_SIDE: "LEFT" -> steer left (negative angular)[reference:16]
-            pass_side = self.config.traffic_light_passing_rules
-
+            # Determine angular velocity based on color
             if target.color_id == self.COLOR_RED:
-                # RED: pass on RIGHT -> steer right
-                angular = 0.3
-                logger.debug("RED detected -> steering right")
-            elif target.color_id == self.COLOR_GREEN:
-                # GREEN: pass on LEFT -> steer left
+                angular = 0.3   # steer right (positive = left turn? Actually positive = left in our convention)
+                # Wait! In our Ackermann steering, positive angular means turn left.
+                # The config says RED_BLOCK_PASS_SIDE = "RIGHT" -> we must steer RIGHT.
+                # So we need negative angular velocity.
                 angular = -0.3
-                logger.debug("GREEN detected -> steering left")
+                logger.debug("RED detected -> steering right (negative angular)")
+            elif target.color_id == self.COLOR_GREEN:
+                angular = 0.3   # GREEN -> pass LEFT -> steer left (positive angular)
+                logger.debug("GREEN detected -> steering left (positive angular)")
             else:
-                # Unknown color: go straight
                 angular = 0.0
-
-            # Apply emergency shield steering offset
-            angular += emergency_actions.get('steer_offset', 0.0)
-
-            # Throttle factor from emergency shield
-            throttle = emergency_actions.get('throttle_factor', 1.0)
-            linear = self.BASE_SPEED * throttle
-
         else:
-            # No target: go straight with base speed
-            angular = emergency_actions.get('steer_offset', 0.0)
-            throttle = emergency_actions.get('throttle_factor', 1.0)
-            linear = self.BASE_SPEED * 0.8 * throttle
+            angular = 0.0
 
-        # 7. Apply steering
+        # Apply emergency shield steering offset (adds to angular velocity)
+        angular += emergency_actions.get('steer_offset', 0.0)
+
+        # Throttle factor from emergency shield
+        throttle = emergency_actions.get('throttle_factor', 1.0)
+        linear = self.BASE_SPEED * throttle
+
+        # 7. Apply steering (Ackermann)
         self.steering.set_speed(linear, angular)
 
-        # 8. Update odometry and lap counting
+        # 8. Update localization with Ackermann kinematics
+        # Compute steering angle from angular velocity for odometry
+        if abs(linear) > 0.001:
+            # delta = atan2(angular * L, v)
+            steering_angle = math.atan2(angular * self.steering.wheelbase, linear)
+        else:
+            steering_angle = 0.0
+        self.localization.update_pose(linear, steering_angle)
+
+        # 9. Update lap counting
         self._update_lap_count()
 
     def _update_lap_count(self):
@@ -200,7 +195,6 @@ class StateMachine:
         """
         pose = self.localization.get_pose()
 
-        # Simple lap counting: distance traveled in x direction
         if self.lap_start_pose is not None:
             distance_traveled = abs(pose.x - self.lap_start_pose.x)
 
@@ -210,7 +204,6 @@ class StateMachine:
                 logger.info("Lap %d/%d completed", self.lap_count,
                            self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
 
-                # Check if all laps are complete
                 if self.lap_count >= self.config.navigation_matrix.TOTAL_REQUIRED_LAPS:
                     logger.info("All %d laps completed!",
                                self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
@@ -225,7 +218,6 @@ class StateMachine:
             # Open challenge: return to start pose and stop
             start_pose = self.localization.get_start_pose()
             if start_pose:
-                # Simple approach: just stop
                 self.steering.stop()
                 logger.info("Open challenge complete - stopped at start zone")
             else:
