@@ -1,6 +1,6 @@
 """
 Parses system_prompt_matrix.yaml into typed Python dataclasses.
-All fields from the YAML are mapped correctly.
+Supports both open_challenge and obstacle_challenge nested structures.
 """
 
 import yaml
@@ -9,11 +9,17 @@ from typing import Optional, List, Dict, Any
 
 
 @dataclass
-class ZoneManagement:
+class ChallengeConfig:
     save_start_point: bool
     use_parking_slot: bool
     start_pose_registration: Dict[str, Any]
     finish_behavior: Dict[str, Any]
+
+
+@dataclass
+class ZoneManagement:
+    open_challenge: ChallengeConfig
+    obstacle_challenge: ChallengeConfig
 
 
 @dataclass
@@ -65,30 +71,22 @@ class SystemConfig:
 
 
 def load_config(yaml_path: str) -> SystemConfig:
-    """
-    Load and parse the YAML configuration file.
-
-    Args:
-        yaml_path: Path to the system_prompt_matrix.yaml file.
-
-    Returns:
-        SystemConfig object with all fields populated.
-
-    Raises:
-        FileNotFoundError: If the YAML file does not exist.
-        KeyError: If any required field is missing.
-        yaml.YAMLError: If the YAML is malformed.
-    """
     with open(yaml_path, 'r') as f:
         data = yaml.safe_load(f)
 
-    # The YAML root is "system_prompt_matrix"
     sm = data['system_prompt_matrix']
+
+    # Parse nested zone_management
+    zm = sm['zone_management']
+    open_challenge = ChallengeConfig(**zm['open_challenge'])
+    obstacle_challenge = ChallengeConfig(**zm['obstacle_challenge'])
+    zone_management = ZoneManagement(open_challenge=open_challenge,
+                                     obstacle_challenge=obstacle_challenge)
 
     return SystemConfig(
         version=sm['version'],
         competition=sm['competition'],
-        zone_management=ZoneManagement(**sm['zone_management']),
+        zone_management=zone_management,
         sensor_fusion_and_tracking=SensorFusionTracking(**sm['sensor_fusion_and_tracking']),
         ultrasonic_emergency_shield=UltrasonicShield(**sm['ultrasonic_emergency_shield']),
         traffic_light_passing_rules=TrafficLightRules(**sm['traffic_light_passing_rules']),
