@@ -1,0 +1,9 @@
+⚠️ The ONE Thing You Must Calibrate on Race Day
+The code is logically complete, but these physical constants need tuning for your specific robot:
+
+Constant	Where to change	Default	How to calibrate
+Wheelbase	steering_controller.py (line 40)	0.25 m	Measure distance between front and rear axles.
+Track width	steering_controller.py (line 41)	0.15 m	Measure distance between left and right rear wheels.
+Lap distance	state_machine.py (line 68)	5.0 m	Drive one lap manually, measure distance, update this value.
+Max speed	steering_controller.py (line 42)	0.5 m/s	Set based on motor capability and track conditions.
+HuskyLens Color IDs	state_machine.py (lines 35‑36)	COLOR_RED = 1, COLOR_GREEN = 2	Learn colors on HuskyLens – they get ID 1, 2, etc. Match these.
