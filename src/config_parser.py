@@ -1,5 +1,6 @@
 """
 Parses system_prompt_matrix.yaml into typed Python dataclasses.
+All fields from the YAML are mapped correctly.
 """
 
 import yaml
@@ -64,10 +65,26 @@ class SystemConfig:
 
 
 def load_config(yaml_path: str) -> SystemConfig:
+    """
+    Load and parse the YAML configuration file.
+
+    Args:
+        yaml_path: Path to the system_prompt_matrix.yaml file.
+
+    Returns:
+        SystemConfig object with all fields populated.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        KeyError: If any required field is missing.
+        yaml.YAMLError: If the YAML is malformed.
+    """
     with open(yaml_path, 'r') as f:
         data = yaml.safe_load(f)
 
+    # The YAML root is "system_prompt_matrix"
     sm = data['system_prompt_matrix']
+
     return SystemConfig(
         version=sm['version'],
         competition=sm['competition'],
