@@ -1,8 +1,13 @@
 """
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
 Supports both Open and Obstacle challenges.
-Uses WallMapper for map building, LIDAR‑based lap counting,
-and wall‑following to steer around corners.
+Integrates:
+  - Per‑lap direction switching (CW/CCW) from YAML.
+  - Adaptive wall‑following (left/right reference based on direction).
+  - Surprise rule (Lap X -> Lap X+1 direction change based on traffic light color).
+  - Emergency lap fallback (force lap completion if LIDAR fails).
+  - Map usage control (enable/disable mapping).
+  - All calibratable parameters now read from config.
 """
 
 import time
@@ -32,10 +37,6 @@ class RobotState(Enum):
 
 
 class StateMachine:
-    # HuskyLens color IDs (learned)
-    COLOR_RED = 1
-    COLOR_GREEN = 2
-
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
                  spatial_map: SpatialMap, emergency_shield: EmergencyShield,
@@ -75,21 +76,36 @@ class StateMachine:
         self.lap_start_pose = None
         self.sections_passed = 0
         self.last_section_time = time.time()
+        self.distance_since_lap_start = 0.0
+        self.lap_start_x = 0.0
 
-        # Navigation constants
-        self.BASE_SPEED = 0.3          # m/s
-        self.STEER_MAGNITUDE = 0.3     # rad/s (yaw rate magnitude when turning)
-        self.WALL_FOLLOW_GAIN = 0.25   # proportional gain for wall‑following
+        # Direction tracking
+        self.current_direction = self.config.navigation_matrix.LAP_1_DIRECTION.upper()
+        self.last_traffic_light_color = None
+        self.surprise_rule_activated = False
 
-        # Lap counting: distance fallback (meters) – calibrate this!
-        self.track_length_estimate = 5.0  # full lap distance
+        # Read all calibratable parameters from config
+        self.BASE_SPEED = self.config.navigation.base_speed_mps
+        self.STEER_MAGNITUDE = self.config.navigation.steer_magnitude_radps
+        self.WALL_FOLLOW_GAIN = self.config.navigation.wall_follow_gain
 
-        # For LIDAR‑based corner detection: store previous side distances
+        # Color IDs from config
+        self.COLOR_RED = self.config.vision.color_red_id
+        self.COLOR_GREEN = self.config.vision.color_green_id
+
+        # Lap counting parameters
+        self.lap_length = self.config.lap_counting.lap_length_m
+        self.section_timeout = self.config.lap_counting.section_fallback_timeout_s
+        self.emergency_margin = self.config.lap_counting.emergency_lap_margin_m
+
+        # LIDAR corner detection history
         self._prev_avg_left = None
         self._prev_avg_right = None
 
-        logger.info(f"StateMachine initialized with challenge: {self.challenge} "
-                    f"(Open: {self.is_open_challenge})")
+        # Map usage flag
+        self.use_mapping = self.config.mapping.use_mapping
+
+        logger.info(f"StateMachine initialized with challenge: {self.challenge}")
 
     def run(self):
         """Main loop; call at ~20-50 Hz."""
@@ -113,6 +129,7 @@ class StateMachine:
         # Register start pose
         self.localization.register_start_pose()
         self.lap_start_pose = self.localization.get_pose()
+        self.lap_start_x = self.lap_start_pose.x
 
         # Register parking slot only if obstacle challenge
         if not self.is_open_challenge:
@@ -122,16 +139,25 @@ class StateMachine:
                 self.parking.start(parking_geometry)
                 logger.info("Parking geometry registered: %s", parking_geometry)
 
-        # Reset lap counter and section counter
+        # Reset lap counters
         self.lap_count = 0
         self.sections_passed = 0
         self.last_section_time = time.time()
+        self.distance_since_lap_start = 0.0
+        self.last_traffic_light_color = None
+        self.surprise_rule_activated = False
+
+        # Set initial direction from YAML
+        self.current_direction = self.config.navigation_matrix.LAP_1_DIRECTION.upper()
+        logger.info(f"Lap 1 direction: {self.current_direction}")
 
         # Reset LIDAR corner detection history
         self._prev_avg_left = None
         self._prev_avg_right = None
 
-        logger.info("Lap counter reset to 0")
+        # Apply mapping enable/disable to localization
+        self.localization.use_map_correction = self.use_mapping
+
         self.state = RobotState.NAVIGATE
         logger.info("Transition to NAVIGATE")
 
@@ -214,39 +240,85 @@ class StateMachine:
         Update lap count using LIDAR‑based corner detection with odometry fallback.
         A lap = 8 sections (4 corners + 4 straights).
         """
+        pose = self.localization.get_pose()
+        if self.lap_start_pose is not None:
+            self.distance_since_lap_start = abs(pose.x - self.lap_start_pose.x)
+
         # 1. Try LIDAR corner detection
         if self._detected_corner_via_lidar():
             self.sections_passed += 1
             self.last_section_time = time.time()
             logger.debug(f"Corner detected via LIDAR -> sections_passed={self.sections_passed}")
 
-        # 2. Fallback: if no corner detected for > 3 seconds, use odometry distance
-        if time.time() - self.last_section_time > 3.0:
-            pose = self.localization.get_pose()
-            if self.lap_start_pose is not None:
-                distance_traveled = abs(pose.x - self.lap_start_pose.x)
-                # Count a section every 1/8 of total lap distance
-                section_distance = self.track_length_estimate / 8.0
-                if distance_traveled > section_distance:
-                    self.sections_passed += 1
-                    self.last_section_time = time.time()
-                    self.lap_start_pose = pose  # reset for next section
-                    logger.debug(f"Section counted via odometry fallback -> sections_passed={self.sections_passed}")
+        # 2. Fallback: if no corner detected for > timeout, use odometry distance
+        elif time.time() - self.last_section_time > self.section_timeout:
+            section_distance = self.lap_length / 8.0
+            if self.distance_since_lap_start > section_distance:
+                self.sections_passed += 1
+                self.last_section_time = time.time()
+                logger.debug(f"Section counted via odometry fallback -> sections_passed={self.sections_passed}")
 
-        # 3. Check if a full lap (8 sections) has been completed
+        # 3. Emergency lap fallback: if sections_passed < 2 and distance is near full lap
+        if self.sections_passed < 2 and self.distance_since_lap_start > (self.lap_length - self.emergency_margin):
+            logger.warning("Emergency lap fallback triggered – force completing lap")
+            self.sections_passed = 8  # force lap completion
+
+        # 4. Check if a full lap (8 sections) has been completed
         if self.sections_passed >= 8:
             self.lap_count += 1
             self.sections_passed = 0
-            self.lap_start_pose = self.localization.get_pose()
+            self.lap_start_pose = pose
+            self.lap_start_x = pose.x
+            self.distance_since_lap_start = 0.0
             logger.info(f"Lap {self.lap_count} completed (section-based)")
 
+            # Apply surprise rule after trigger lap
+            if (self.lap_count == self.config.surprise_rule.trigger_lap and
+                self.config.surprise_rule.enabled and not self.surprise_rule_activated):
+                self._apply_surprise_rule()
+
+            # Check if all laps completed
             if self.lap_count >= self.config.navigation_matrix.TOTAL_REQUIRED_LAPS:
                 logger.info("All %d laps completed!", self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
                 self.state = RobotState.TERMINATION
 
+    def _apply_surprise_rule(self):
+        """Apply the surprise rule based on last traffic light color."""
+        rule = self.config.surprise_rule
+        logger.info(f"Applying surprise rule (trigger lap {rule.trigger_lap})")
+        self.surprise_rule_activated = True
+
+        # Determine direction for next lap
+        if self.last_traffic_light_color == self.COLOR_GREEN and rule.color_to_continue.upper() == "GREEN":
+            # Keep same direction
+            new_direction = self.current_direction
+            logger.info(f"Last sign = GREEN -> same direction: {new_direction}")
+        elif self.last_traffic_light_color == self.COLOR_RED and rule.color_to_reverse.upper() == "RED":
+            # Reverse direction
+            new_direction = "COUNTER_CLOCKWISE" if self.current_direction == "CLOCKWISE" else "CLOCKWISE"
+            logger.info(f"Last sign = RED -> reverse direction: {new_direction}")
+        else:
+            # Fallback
+            if rule.fallback_direction.upper() == "REVERSE":
+                new_direction = "COUNTER_CLOCKWISE" if self.current_direction == "CLOCKWISE" else "CLOCKWISE"
+            else:
+                new_direction = self.current_direction
+            logger.info(f"No matching sign or fallback -> direction: {new_direction}")
+
+        self.current_direction = new_direction
+
+        # Execute the 180° turn if direction changed
+        if self.current_direction != self.config.navigation_matrix.LAP_1_DIRECTION:
+            self.steering.turn_around(speed=rule.turnaround_speed)
+        else:
+            logger.info("Direction unchanged, no turn needed")
+
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
-        # 1. Get color detections from HuskyLens
+        # 1. Update mapping enable/disable (in case it changed)
+        self.localization.use_map_correction = self.use_mapping
+
+        # 2. Get color detections from HuskyLens
         color_blocks = self.vision.get_latest_colors()
         detections = []
         for color_block in color_blocks:
@@ -262,77 +334,72 @@ class StateMachine:
         if detections:
             self.spatial_map.update(detections)
 
-        # 2. Get confirmed objects from spatial map
         confirmed_objects = self.spatial_map.get_confirmed_objects()
-
-        # 3. Determine target direction from traffic light (if any)
+        traffic_angular = 0.0
         if confirmed_objects:
-            target = confirmed_objects[0]
+            target = confirmed_objects[0]  # closest
+            # Store last color for surprise rule
+            self.last_traffic_light_color = target.color_id
             traffic_angular = self._get_angular_velocity_from_color(target.color_id)
-            self.emergency.set_target_steer_direction(math.copysign(1.0, traffic_angular) if traffic_angular != 0 else 0.0)
-        else:
-            traffic_angular = 0.0
-            self.emergency.set_target_steer_direction(0.0)
 
-        # 4. Wall‑following using LIDAR (for general track navigation)
-        # Read side distances
+        # 3. Wall‑following using LIDAR (adaptive to direction)
         scan = self.lidar.get_scan_snapshot()
         left_dist = None
         right_dist = None
         for ang, dist in scan.items():
             if dist < 0.05 or dist > 5.0:
                 continue
-            if abs(ang - 90) < 10:          # left side
+            if abs(ang - 90) < 10:
                 left_dist = dist if left_dist is None or dist < left_dist else left_dist
-            elif abs(ang + 90) < 10:        # right side
+            elif abs(ang + 90) < 10:
                 right_dist = dist if right_dist is None or dist < right_dist else right_dist
 
-        # Compute wall‑following steering
-        wall_follow_steer = 0.0
+        wall_steer = 0.0
         if left_dist is not None and right_dist is not None:
             error = left_dist - right_dist   # positive = too close to left wall
-            wall_follow_steer = -self.WALL_FOLLOW_GAIN * error   # steer right if error positive
+            if self.current_direction == "CLOCKWISE":
+                # CW: follow left wall – steer right if error positive
+                wall_steer = -self.WALL_FOLLOW_GAIN * error
+            else:  # COUNTER_CLOCKWISE
+                # CCW: follow right wall – steer left if error positive
+                wall_steer = self.WALL_FOLLOW_GAIN * error
             # Clamp to reasonable range
-            wall_follow_steer = max(-0.5, min(0.5, wall_follow_steer))
+            wall_steer = max(-0.5, min(0.5, wall_steer))
 
-        # 5. Combine traffic light steering with wall‑following
-        # If a traffic light is detected, use its angular command (more important).
-        # Otherwise use wall‑following.
+        # 4. Combine: traffic light has priority
         if abs(traffic_angular) > 0.01:
             raw_angular = traffic_angular
         else:
-            raw_angular = wall_follow_steer
+            raw_angular = wall_steer
 
-        # 6. Update emergency shield
+        # 5. Emergency shield
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
 
-        # 7. Check emergency stop
         if emergency_actions.get('brake', False):
             self.steering.stop()
             self.state = RobotState.EMERGENCY_STOP
             logger.warning("Emergency stop triggered")
             return
 
-        # 8. Apply emergency shield corrections (it may override steering)
         angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
         throttle = emergency_actions.get('throttle_factor', 1.0)
         linear = self.BASE_SPEED * throttle
 
-        # 9. Apply steering (Ackermann – one motor + servo)
+        # 6. Apply steering (Ackermann – one motor + servo)
         self.steering.set_speed(linear, angular)
 
-        # 10. Update localization with LIDAR points for mapping
+        # 7. Update localization with LIDAR points for mapping
         scan_data = self.lidar.get_scan_snapshot()
         lidar_scan = [(ang, dist) for ang, dist in scan_data.items()]
         # Use a subset to reduce processing (every 5 degrees)
         lidar_subset = [(ang, dist) for ang, dist in lidar_scan if abs(ang) % 5 < 1]
 
-        # Convert angular to steering angle for odometry (approximation)
-        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * 0.25, linear)
+        # Convert angular to steering angle for odometry (approximation using wheelbase from config)
+        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.config.vehicle.wheelbase_m, linear)
         self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
 
-        # 11. Update lap counting
+        # 8. Update lap counting
         self._update_lap_count()
 
     def _termination_state(self):
@@ -373,4 +440,6 @@ class StateMachine:
         self.lap_start_pose = None
         self._prev_avg_left = None
         self._prev_avg_right = None
+        self.last_traffic_light_color = None
+        self.surprise_rule_activated = False
         logger.info("State machine reset to INIT")
