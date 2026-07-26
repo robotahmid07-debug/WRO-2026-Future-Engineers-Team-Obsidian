@@ -1,7 +1,7 @@
 """
 Ackermann steering localization using the Bicycle Model.
 Integrates WallMapper for map‑based pose correction using LIDAR wall distances.
-The LIDAR is assumed to be mounted on top, scanning 360°.
+All calibratable parameters (wheelbase) are read from the config.
 """
 
 import math
@@ -24,17 +24,25 @@ class Pose2D:
 
 
 class Localization:
-    def __init__(self, lidar_fusion, config: dict):
+    def __init__(self, lidar_fusion, config: dict, use_map_correction: bool = True):
         """
         Initialize localization with Ackermann bicycle model.
 
         Args:
             lidar_fusion: LidarFusion object (used for getting LIDAR scans).
-            config: Configuration dictionary (from YAML).
+            config: Configuration dictionary (from YAML). Must contain 'vehicle' -> 'wheelbase_m'.
+            use_map_correction: Whether to use WallMapper for pose correction.
         """
         self.lidar = lidar_fusion
         self.config = config
-        self.wheelbase = 0.25  # meters, distance between front and rear axles
+
+        # Read wheelbase from config (with fallback for safety)
+        if hasattr(config, 'vehicle') and hasattr(config.vehicle, 'wheelbase_m'):
+            self.wheelbase = config.vehicle.wheelbase_m
+        else:
+            # Fallback if config doesn't have it (shouldn't happen with new parser)
+            logger.warning("wheelbase_m not found in config, using default 0.25m")
+            self.wheelbase = 0.25
 
         # Current and initial poses
         self.current_pose = Pose2D(0.0, 0.0, 0.0)
@@ -49,8 +57,8 @@ class Localization:
         # Initialize WallMapper for map building and pose correction
         self.wall_mapper = WallMapper(resolution=0.02, map_size=400, update_threshold=30)
 
-        # Flag to enable/disable map correction (can be controlled from config)
-        self.use_map_correction = True
+        # Flag to enable/disable map correction (controlled by state machine)
+        self.use_map_correction = use_map_correction
 
         # Store last LIDAR scan for pose correction
         self.last_lidar_scan: List[Tuple[float, float]] = []
@@ -185,3 +193,7 @@ class Localization:
     def load_map(self, filename: str) -> None:
         """Convenience method to load a saved map."""
         self.wall_mapper.load_map(filename)
+
+    def clear_map(self) -> None:
+        """Convenience method to clear the map (force rebuild)."""
+        self.wall_mapper.clear_map()
