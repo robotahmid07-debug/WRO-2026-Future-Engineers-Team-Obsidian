@@ -164,14 +164,15 @@ class StateMachine:
         Returns:
             True if a corner passage is detected.
         """
-        # Get current LIDAR scan data
-        if not hasattr(self.lidar, 'scan_data') or not self.lidar.scan_data:
+        # Get thread‑safe LIDAR snapshot
+        scan_data = self.lidar.get_scan_snapshot()
+        if not scan_data:
             return False
 
         # Collect distances to left (90°) and right (-90°)
         left_dists = []
         right_dists = []
-        for ang, dist in self.lidar.scan_data.items():
+        for ang, dist in scan_data.items():
             if dist < 0.05 or dist > 5.0:
                 continue
             if abs(ang - 90) < 10:
@@ -286,10 +287,9 @@ class StateMachine:
         self.steering.set_speed(linear, angular)
 
         # 5. Update localization with LIDAR points for mapping
-        lidar_scan = []
-        if hasattr(self.lidar, 'scan_data') and self.lidar.scan_data:
-            for angle, dist in self.lidar.scan_data.items():
-                lidar_scan.append((angle, dist))
+        # Get thread‑safe LIDAR snapshot
+        scan_data = self.lidar.get_scan_snapshot()
+        lidar_scan = [(ang, dist) for ang, dist in scan_data.items()]
         # Use a subset to reduce processing (every 5 degrees)
         lidar_subset = [(ang, dist) for ang, dist in lidar_scan if abs(ang) % 5 < 1]
 
