@@ -2,14 +2,14 @@
 """
 Primary execution entrypoint for WRO Future Engineers 2026.
 Reads a hardware switch to select Open or Obstacle challenge.
-Uses WallMapper for map‑based localization.
+Uses WallMapper for map‑based localization, smart obstacle avoidance,
+and LIDAR‑based parallel parking.
 """
 
 import sys
 import time
 import signal
 import logging
-import threading
 from pathlib import Path
 
 # GPIO for mode selection
@@ -19,7 +19,7 @@ import RPi.GPIO as GPIO
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from src.config_parser import load_config
-from src.hardware_pins import PiPins, ESP32Pins
+from src.hardware_pins import PiPins
 from src.serial_bridge import SerialBridge
 from src.vision_tracker import HuskyLensReader
 from src.lidar_fusion import LidarFusion
@@ -82,46 +82,48 @@ def main():
     else:
         logger.info("HuskyLens V2 initialized")
 
-    # LIDAR
+    # LIDAR – used for mapping, corner detection, traffic light fusion, and parking
     lidar = LidarFusion(port='/dev/ttyUSB1')
     lidar.open()
     logger.info("LIDAR initialized")
 
-    # Spatial map
+    # Spatial map for object tracking
     spatial_config = config.sensor_fusion_and_tracking.host_spatial_tracker
     spatial_map = SpatialMap(spatial_config)
     logger.info("Spatial map initialized")
 
     # ------------------------------------------------------------------
-    # 4. Initialize localization with WallMapper (UPDATED)
+    # 4. Localization with WallMapper (map correction)
     # ------------------------------------------------------------------
-    # Localization now accepts a third parameter: use_map_correction
     localization = Localization(lidar, config.zone_management, use_map_correction=True)
     logger.info("Localization initialized (map correction enabled)")
 
     # ------------------------------------------------------------------
-    # 5. Initialize steering controller (UPDATED with trackwidth)
+    # 5. Ackermann steering controller
     # ------------------------------------------------------------------
-    # Now using wheelbase=0.25, trackwidth=0.15 (Ackermann geometry)
     steering = SteeringController(
         serial_bridge,
-        wheelbase=0.25,
-        trackwidth=0.15,
-        max_speed=0.5
+        wheelbase=0.25,     # adjust to your car's wheelbase
+        trackwidth=0.15,    # adjust to your car's track width
+        max_speed=0.5       # max forward speed (m/s)
     )
     logger.info("Steering controller initialized (Ackermann)")
 
-    # Emergency shield
+    # ------------------------------------------------------------------
+    # 6. Smart Emergency Shield (traffic‑rule‑aware obstacle avoidance)
+    # ------------------------------------------------------------------
     emergency = EmergencyShield(config.ultrasonic_emergency_shield, serial_bridge)
-    logger.info("Emergency shield initialized")
-
-    # Parking controller
-    parking = ParkingController(localization, steering, emergency,
-                                config.zone_management)
-    logger.info("Parking controller initialized")
+    logger.info("Emergency shield initialized (smart avoidance)")
 
     # ------------------------------------------------------------------
-    # 6. Create StateMachine with the selected challenge
+    # 7. LIDAR‑based Parking Controller (uses 360° LIDAR for precision)
+    # ------------------------------------------------------------------
+    # NOTE: We pass `lidar` here, NOT `emergency` – LIDAR gives accurate 360° distances.
+    parking = ParkingController(localization, steering, lidar, config.zone_management)
+    logger.info("Parking controller initialized (LIDAR‑based)")
+
+    # ------------------------------------------------------------------
+    # 8. State Machine
     # ------------------------------------------------------------------
     fsm = StateMachine(config, serial_bridge, localization, vision, lidar,
                        spatial_map, emergency, steering, parking,
@@ -129,7 +131,7 @@ def main():
     logger.info("State machine initialized with %s challenge", challenge)
 
     # ------------------------------------------------------------------
-    # 7. Optional: Load a previously saved map (if available)
+    # 9. Optional: Load a previously saved map (if available)
     # ------------------------------------------------------------------
     map_file = Path(__file__).parent / 'saved_map.pkl'
     if map_file.exists() and localization.is_map_ready():
@@ -140,7 +142,7 @@ def main():
             logger.warning(f"Failed to load map: {e}")
 
     # ------------------------------------------------------------------
-    # 8. Setup signal handlers and main loop
+    # 10. Setup signal handlers and main loop (20 Hz)
     # ------------------------------------------------------------------
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -168,7 +170,7 @@ def main():
             time.sleep(0.1)
 
     # ------------------------------------------------------------------
-    # 9. Optional: Save the map for next run (if built)
+    # 11. Optional: Save the map for next run (if built)
     # ------------------------------------------------------------------
     if localization.is_map_ready():
         try:
@@ -178,7 +180,7 @@ def main():
             logger.warning(f"Failed to save map: {e}")
 
     # ------------------------------------------------------------------
-    # 10. Cleanup
+    # 12. Cleanup
     # ------------------------------------------------------------------
     logger.info("Shutting down...")
     steering.stop()
