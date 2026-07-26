@@ -1,7 +1,7 @@
 """
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
-Supports both Open and Obstacle challenges via nested YAML config.
-Uses Ackermann steering geometry.
+Supports both Open and Obstacle challenges.
+Uses WallMapper for map building and LIDAR‑based lap counting.
 """
 
 import time
@@ -18,6 +18,7 @@ from .spatial_map import SpatialMap, TrackedObject
 from .emergency_shield import EmergencyShield
 from .steering_controller import SteeringController
 from .parking_controller import ParkingController
+from .wall_mapper import WallMapper
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,7 @@ class RobotState(Enum):
 
 
 class StateMachine:
-    """
-    Main state machine for WRO Future Engineers 2026.
-    Uses Ackermann steering. Config-driven for both challenges.
-    """
-
-    # Color ID mapping (learned on HuskyLens V2)
+    # HuskyLens color IDs (learned)
     COLOR_RED = 1
     COLOR_GREEN = 2
 
@@ -49,7 +45,7 @@ class StateMachine:
 
         Args:
             config: Parsed SystemConfig object.
-            challenge: "open" or "obstacle" - selects which challenge mode to run.
+            challenge: "open" or "obstacle" – selects which challenge mode to run.
         """
         self.config = config
         self.serial_bridge = serial_bridge
@@ -70,18 +66,25 @@ class StateMachine:
         else:
             raise ValueError(f"Invalid challenge: {challenge}. Must be 'open' or 'obstacle'.")
 
-        # Determine if this is open challenge (no parking) or obstacle (parking)
         self.is_open_challenge = not self.active_config.use_parking_slot
 
         # State tracking
         self.state = RobotState.INIT
         self.lap_count = 0
         self.lap_start_pose = None
-        self.track_length_estimate = 5.0  # meters per lap (calibrate)
+        self.sections_passed = 0
+        self.last_section_time = time.time()
 
         # Navigation constants
         self.BASE_SPEED = 0.3  # m/s
         self.STEER_MAGNITUDE = 0.3  # rad/s (yaw rate magnitude when turning)
+
+        # Lap counting: distance fallback (meters) – calibrate this!
+        self.track_length_estimate = 5.0  # full lap distance
+
+        # For LIDAR‑based corner detection: store previous side distances
+        self._prev_avg_left = None
+        self._prev_avg_right = None
 
         logger.info(f"StateMachine initialized with challenge: {self.challenge} "
                     f"(Open: {self.is_open_challenge})")
@@ -105,11 +108,11 @@ class StateMachine:
         """Initialize robot state: register pose, reset counters."""
         logger.info("State: INIT")
 
-        # Register start pose (always done)
+        # Register start pose
         self.localization.register_start_pose()
         self.lap_start_pose = self.localization.get_pose()
 
-        # Register parking slot ONLY if obstacle challenge
+        # Register parking slot only if obstacle challenge
         if not self.is_open_challenge:
             self.localization.register_parking_slot()
             parking_geometry = self.localization.parking_bay_geometry
@@ -117,11 +120,16 @@ class StateMachine:
                 self.parking.start(parking_geometry)
                 logger.info("Parking geometry registered: %s", parking_geometry)
 
-        # Reset lap counter
+        # Reset lap counter and section counter
         self.lap_count = 0
-        logger.info("Lap counter reset to 0")
+        self.sections_passed = 0
+        self.last_section_time = time.time()
 
-        # Transition to NAVIGATE
+        # Reset LIDAR corner detection history
+        self._prev_avg_left = None
+        self._prev_avg_right = None
+
+        logger.info("Lap counter reset to 0")
         self.state = RobotState.NAVIGATE
         logger.info("Transition to NAVIGATE")
 
@@ -130,12 +138,8 @@ class StateMachine:
         Determines the angular velocity (yaw rate) based on the color ID
         and the pass-side rules defined in the YAML config.
 
-        Convention:
-        - Positive angular velocity = Turn LEFT
-        - Negative angular velocity = Turn RIGHT
-
         Returns:
-            Angular velocity in rad/s. 0.0 if color is unknown or should go straight.
+            Angular velocity in rad/s. 0.0 if unknown.
         """
         if color_id == self.COLOR_RED:
             pass_side = self.config.traffic_light_passing_rules.RED_BLOCK_PASS_SIDE.upper()
@@ -152,8 +156,93 @@ class StateMachine:
             logger.warning(f"Invalid pass side '{pass_side}' in config. Defaulting to straight.")
             return 0.0
 
+    def _detected_corner_via_lidar(self) -> bool:
+        """
+        Detect if the robot is passing a corner by analyzing side wall distances.
+        A corner is detected when the side distance changes suddenly (> 40% change).
+
+        Returns:
+            True if a corner passage is detected.
+        """
+        # Get current LIDAR scan data
+        if not hasattr(self.lidar, 'scan_data') or not self.lidar.scan_data:
+            return False
+
+        # Collect distances to left (90°) and right (-90°)
+        left_dists = []
+        right_dists = []
+        for ang, dist in self.lidar.scan_data.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang - 90) < 10:
+                left_dists.append(dist)
+            elif abs(ang + 90) < 10:
+                right_dists.append(dist)
+
+        if not left_dists or not right_dists:
+            return False
+
+        avg_left = sum(left_dists) / len(left_dists)
+        avg_right = sum(right_dists) / len(right_dists)
+
+        # If no previous values, store and return false
+        if self._prev_avg_left is None or self._prev_avg_right is None:
+            self._prev_avg_left = avg_left
+            self._prev_avg_right = avg_right
+            return False
+
+        # Compute percentage change (avoid division by zero)
+        left_change = abs(avg_left - self._prev_avg_left) / max(self._prev_avg_left, 0.1)
+        right_change = abs(avg_right - self._prev_avg_right) / max(self._prev_avg_right, 0.1)
+
+        # Update stored values
+        self._prev_avg_left = avg_left
+        self._prev_avg_right = avg_right
+
+        # If change > 40%, it's likely a corner
+        if left_change > 0.4 or right_change > 0.4:
+            logger.debug(f"Corner detected: left_change={left_change:.2f}, right_change={right_change:.2f}")
+            return True
+
+        return False
+
+    def _update_lap_count(self):
+        """
+        Update lap count using LIDAR‑based corner detection with odometry fallback.
+        A lap = 8 sections (4 corners + 4 straights).
+        """
+        # 1. Try LIDAR corner detection
+        if self._detected_corner_via_lidar():
+            self.sections_passed += 1
+            self.last_section_time = time.time()
+            logger.debug(f"Corner detected via LIDAR -> sections_passed={self.sections_passed}")
+
+        # 2. Fallback: if no corner detected for > 3 seconds, use odometry distance
+        if time.time() - self.last_section_time > 3.0:
+            pose = self.localization.get_pose()
+            if self.lap_start_pose is not None:
+                distance_traveled = abs(pose.x - self.lap_start_pose.x)
+                # Count a section every 1/8 of total lap distance
+                section_distance = self.track_length_estimate / 8.0
+                if distance_traveled > section_distance:
+                    self.sections_passed += 1
+                    self.last_section_time = time.time()
+                    self.lap_start_pose = pose  # reset for next section
+                    logger.debug(f"Section counted via odometry fallback -> sections_passed={self.sections_passed}")
+
+        # 3. Check if a full lap (8 sections) has been completed
+        if self.sections_passed >= 8:
+            self.lap_count += 1
+            self.sections_passed = 0
+            self.lap_start_pose = self.localization.get_pose()
+            logger.info(f"Lap {self.lap_count} completed (section-based)")
+
+            if self.lap_count >= self.config.navigation_matrix.TOTAL_REQUIRED_LAPS:
+                logger.info("All %d laps completed!", self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
+                self.state = RobotState.TERMINATION
+
     def _navigate_state(self):
-        """Main navigation loop with sensor fusion and Ackermann control."""
+        """Main navigation loop with sensor fusion and control."""
         # 1. Update emergency shield
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
@@ -165,97 +254,62 @@ class StateMachine:
             logger.warning("Emergency stop triggered")
             return
 
-        # 3. Get color detections from HuskyLens V2
+        # 3. Get color detections from HuskyLens
         color_blocks = self.vision.get_latest_colors()
-
-        # 4. Process detections and update spatial map
         detections = []
         for color_block in color_blocks:
-            # Map centroid to angle (HuskyLens V2 FOV ~60 degrees)
-            # x ranges 0-319, center is 160
-            angle_deg = ((color_block.x - 160) / 160.0) * 30.0  # -30 to +30 degrees
-
-            # Get LIDAR range in that direction
+            angle_deg = ((color_block.x - 160) / 160.0) * 30.0  # -30 to +30 deg
             range_m = self.lidar.get_range_in_sector(angle_deg, 5.0)
-
             if range_m is not None and range_m > 0.1:
-                # Compute local coordinates (forward = x, left = y)
                 angle_rad = math.radians(angle_deg)
                 x_local = range_m * math.cos(angle_rad)
                 y_local = range_m * math.sin(angle_rad)
-
-                # Only forward detections
                 if x_local > 0:
                     detections.append((color_block.color_id, x_local, y_local))
 
-        # Update spatial map with detections
         if detections:
             self.spatial_map.update(detections)
 
-        # 5. Get confirmed objects
         confirmed_objects = self.spatial_map.get_confirmed_objects()
-
-        # 6. Determine target and steering (fully config-driven)
         if confirmed_objects:
-            target = confirmed_objects[0]  # Sorted by distance
+            target = confirmed_objects[0]  # closest
             angular = self._get_angular_velocity_from_color(target.color_id)
-            logger.debug(f"Color ID {target.color_id} -> angular = {angular:.2f} rad/s")
         else:
             angular = 0.0
 
-        # Apply emergency shield steering offset (adds to angular velocity)
+        # Apply emergency shield steering offset
         angular += emergency_actions.get('steer_offset', 0.0)
-
-        # Throttle factor from emergency shield
         throttle = emergency_actions.get('throttle_factor', 1.0)
         linear = self.BASE_SPEED * throttle
 
-        # 7. Apply steering (Ackermann)
+        # 4. Apply steering (Ackermann)
         self.steering.set_speed(linear, angular)
 
-        # 8. Update localization with Ackermann kinematics
-        # Compute steering angle from angular velocity for odometry
-        if abs(linear) > 0.001:
-            steering_angle = math.atan2(angular * self.steering.wheelbase, linear)
-        else:
-            steering_angle = 0.0
-        self.localization.update_pose(linear, steering_angle)
+        # 5. Update localization with LIDAR points for mapping
+        lidar_scan = []
+        if hasattr(self.lidar, 'scan_data') and self.lidar.scan_data:
+            for angle, dist in self.lidar.scan_data.items():
+                lidar_scan.append((angle, dist))
+        # Use a subset to reduce processing (every 5 degrees)
+        lidar_subset = [(ang, dist) for ang, dist in lidar_scan if abs(ang) % 5 < 1]
 
-        # 9. Update lap counting
+        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.steering.wheelbase, linear)
+        self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
+
+        # 6. Update lap counting
         self._update_lap_count()
-
-    def _update_lap_count(self):
-        """
-        Update lap count based on odometry.
-        In production, use wall detection or line crossing for better accuracy.
-        """
-        pose = self.localization.get_pose()
-
-        if self.lap_start_pose is not None:
-            distance_traveled = abs(pose.x - self.lap_start_pose.x)
-
-            if distance_traveled > self.track_length_estimate:
-                self.lap_count += 1
-                self.lap_start_pose = pose
-                logger.info("Lap %d/%d completed", self.lap_count,
-                           self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
-
-                if self.lap_count >= self.config.navigation_matrix.TOTAL_REQUIRED_LAPS:
-                    logger.info("All %d laps completed!",
-                               self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
-                    self.state = RobotState.TERMINATION
-                    logger.info("Transition to TERMINATION")
 
     def _termination_state(self):
         """Handle termination: open challenge stop or obstacle parking."""
         logger.info("State: TERMINATION")
 
         if self.is_open_challenge:
-            # Open challenge: return to start pose and stop
+            # Open challenge: stop at start zone
             start_pose = self.localization.get_start_pose()
             if start_pose:
+                # For simplicity, just stop
                 self.steering.stop()
-                logger.info("Open challenge complete - stopped at start zone")
+                logger.info("Open challenge complete – stopped at start zone")
             else:
                 self.steering.stop()
         else:
@@ -271,7 +325,7 @@ class StateMachine:
                     logger.warning("Parking sequence ABORTED.")
 
     def _emergency_stop(self):
-        """Emergency stop state - robot is stopped."""
+        """Emergency stop state – robot is stopped."""
         self.steering.stop()
         logger.warning("Robot in EMERGENCY_STOP state. Manual reset required.")
 
@@ -279,5 +333,8 @@ class StateMachine:
         """Reset the state machine to INIT."""
         self.state = RobotState.INIT
         self.lap_count = 0
+        self.sections_passed = 0
         self.lap_start_pose = None
+        self._prev_avg_left = None
+        self._prev_avg_right = None
         logger.info("State machine reset to INIT")
