@@ -254,3 +254,18 @@ class WallMapper:
             self.grid, self.wall_segments = pickle.load(f)
         self.is_mapped = True
         logger.info(f"Map loaded from {filename}")
+
+    # ------------------------------
+    # NEW METHOD: clear_map()
+    # ------------------------------
+    def clear_map(self) -> None:
+        """
+        Reset the occupancy grid, wall segments, and all internal state.
+        Used when `force_rebuild` is True to erase any existing map.
+        """
+        self.grid = [[MapCell() for _ in range(self.map_size)] for _ in range(self.map_size)]
+        self.wall_segments = []
+        self.is_mapped = False
+        self.total_updates = 0
+        self.last_scan = []
+        logger.info("WallMapper: Map cleared for forced rebuild.")
