@@ -1,7 +1,8 @@
 """
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
 Supports both Open and Obstacle challenges.
-Uses WallMapper for map building and LIDAR‑based lap counting.
+Uses WallMapper for map building, LIDAR‑based lap counting,
+and wall‑following to steer around corners.
 """
 
 import time
@@ -76,8 +77,9 @@ class StateMachine:
         self.last_section_time = time.time()
 
         # Navigation constants
-        self.BASE_SPEED = 0.3  # m/s
-        self.STEER_MAGNITUDE = 0.3  # rad/s (yaw rate magnitude when turning)
+        self.BASE_SPEED = 0.3          # m/s
+        self.STEER_MAGNITUDE = 0.3     # rad/s (yaw rate magnitude when turning)
+        self.WALL_FOLLOW_GAIN = 0.25   # proportional gain for wall‑following
 
         # Lap counting: distance fallback (meters) – calibrate this!
         self.track_length_estimate = 5.0  # full lap distance
@@ -263,44 +265,74 @@ class StateMachine:
         # 2. Get confirmed objects from spatial map
         confirmed_objects = self.spatial_map.get_confirmed_objects()
 
-        # 3. Tell emergency shield the target direction based on traffic light
+        # 3. Determine target direction from traffic light (if any)
         if confirmed_objects:
             target = confirmed_objects[0]
-            angular = self._get_angular_velocity_from_color(target.color_id)
-            # Tell emergency shield which direction we want to go
-            self.emergency.set_target_steer_direction(math.copysign(1.0, angular) if angular != 0 else 0.0)
+            traffic_angular = self._get_angular_velocity_from_color(target.color_id)
+            self.emergency.set_target_steer_direction(math.copysign(1.0, traffic_angular) if traffic_angular != 0 else 0.0)
         else:
+            traffic_angular = 0.0
             self.emergency.set_target_steer_direction(0.0)
 
-        # 4. Update emergency shield
+        # 4. Wall‑following using LIDAR (for general track navigation)
+        # Read side distances
+        scan = self.lidar.get_scan_snapshot()
+        left_dist = None
+        right_dist = None
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang - 90) < 10:          # left side
+                left_dist = dist if left_dist is None or dist < left_dist else left_dist
+            elif abs(ang + 90) < 10:        # right side
+                right_dist = dist if right_dist is None or dist < right_dist else right_dist
+
+        # Compute wall‑following steering
+        wall_follow_steer = 0.0
+        if left_dist is not None and right_dist is not None:
+            error = left_dist - right_dist   # positive = too close to left wall
+            wall_follow_steer = -self.WALL_FOLLOW_GAIN * error   # steer right if error positive
+            # Clamp to reasonable range
+            wall_follow_steer = max(-0.5, min(0.5, wall_follow_steer))
+
+        # 5. Combine traffic light steering with wall‑following
+        # If a traffic light is detected, use its angular command (more important).
+        # Otherwise use wall‑following.
+        if abs(traffic_angular) > 0.01:
+            raw_angular = traffic_angular
+        else:
+            raw_angular = wall_follow_steer
+
+        # 6. Update emergency shield
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
 
-        # 5. Check emergency stop
+        # 7. Check emergency stop
         if emergency_actions.get('brake', False):
             self.steering.stop()
             self.state = RobotState.EMERGENCY_STOP
             logger.warning("Emergency stop triggered")
             return
 
-        # 6. Calculate steering from emergency actions
-        angular = emergency_actions.get('steer_offset', 0.0)
+        # 8. Apply emergency shield corrections (it may override steering)
+        angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
         throttle = emergency_actions.get('throttle_factor', 1.0)
         linear = self.BASE_SPEED * throttle
 
-        # 7. Apply steering (Ackermann)
+        # 9. Apply steering (Ackermann – one motor + servo)
         self.steering.set_speed(linear, angular)
 
-        # 8. Update localization with LIDAR points for mapping
+        # 10. Update localization with LIDAR points for mapping
         scan_data = self.lidar.get_scan_snapshot()
         lidar_scan = [(ang, dist) for ang, dist in scan_data.items()]
         # Use a subset to reduce processing (every 5 degrees)
         lidar_subset = [(ang, dist) for ang, dist in lidar_scan if abs(ang) % 5 < 1]
 
-        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.steering.wheelbase, linear)
+        # Convert angular to steering angle for odometry (approximation)
+        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * 0.25, linear)
         self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
 
-        # 9. Update lap counting
+        # 11. Update lap counting
         self._update_lap_count()
 
     def _termination_state(self):
