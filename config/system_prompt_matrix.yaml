@@ -3,6 +3,13 @@ system_prompt_matrix:
   competition: "WRO Future Engineers"
 
   # ==========================================
+  # 0. CHALLENGE SELECTION
+  # ==========================================
+  # This is optional – if set, it overrides the hardware switch.
+  # Leave commented to use the hardware switch (GPIO 22).
+  # active_challenge: "open"   # "open" or "obstacle"
+
+  # ==========================================
   # 1. ZONE & POSE MANAGEMENT
   # ==========================================
   zone_management:
@@ -39,12 +46,12 @@ system_prompt_matrix:
   # ==========================================
   sensor_fusion_and_tracking:
     huskylens_camera:
-      role: "RAW_BOUNDING_BOX_DETECTOR" # No internal tracking managed on camera
+      role: "RAW_BOUNDING_BOX_DETECTOR"
       outputs: ["COLOR_ID", "CENTROID_X", "CENTROID_Y", "WIDTH", "HEIGHT"]
       horizontal_fov_deg: 60.0
 
     lidar_2d:
-      scan_arc_deg: 90.0 # -45 deg to +45 deg forward arc
+      scan_arc_deg: 90.0
       update_rate_hz: 10
 
     host_spatial_tracker:
@@ -57,16 +64,16 @@ system_prompt_matrix:
           Local_Coord = (R_rel * cos(Theta_rel), R_rel * sin(Theta_rel))
 
       spatial_gating:
-        tolerance_radius_m: 0.20 # If new detection is within 20 cm of known object, merge as same ID
-        
+        tolerance_radius_m: 0.20
+
       debouncing_and_persistence:
-        confirmation_threshold_frames: 3 # Object marked CONFIRMED after appearing in N frames
-        frame_loss_tolerance_sec: 1.5   # Keep object active in local map during brief vision dropouts/flicker
-        prune_condition: "Y_LOCAL < 0.0" # Drop object from active queue only after vehicle physically passes it
+        confirmation_threshold_frames: 3
+        frame_loss_tolerance_sec: 1.5
+        prune_condition: "Y_LOCAL < 0.0"
 
       passing_priority_queue:
         sorting_rule: "SORT_BY_ASCENDING_FORWARD_DISTANCE"
-        active_target: "QUEUE_INDEX_0" # Steering decision always targets closest confirmed pillar
+        active_target: "QUEUE_INDEX_0"
 
   # ==========================================
   # 3. EMERGENCY ULTRASONIC BUMPER SHIELD
@@ -74,11 +81,12 @@ system_prompt_matrix:
   ultrasonic_emergency_shield:
     enabled: True
     thresholds_cm:
-      front_stop: 12.0                  # Hard stop / emergency brake distance from wall directly ahead
-      front_left_safety: 18.0           # Hard steer right if front-left bumper gets too close
-      front_right_safety: 18.0          # Hard steer left if front-right bumper gets too close
+      front_stop: 12.0                  # Start reducing speed
+      front_left_safety: 18.0           # Steer right if left side close
+      front_right_safety: 18.0          # Steer left if right side close
+      critical_stop: 8.0                # <-- NEW: Reverse if closer than this
     dynamic_throttle:
-      enable_speed_dampening: True      # Drops motor speed by 40% when side ultrasonics register close walls
+      enable_speed_dampening: True
       dampened_speed_factor: 0.60
 
   # ==========================================
@@ -87,16 +95,31 @@ system_prompt_matrix:
   traffic_light_passing_rules:
     RED_BLOCK_PASS_SIDE: "RIGHT"
     GREEN_BLOCK_PASS_SIDE: "LEFT"
-    INVERT_COLORS_MID_RACE: False # Toggle for surprise rule adjustments
+    INVERT_COLORS_MID_RACE: False
 
+  # ==========================================
+  # 5. NAVIGATION & LAP COUNTING
+  # ==========================================
   navigation_matrix:
     TOTAL_REQUIRED_LAPS: 3
     LAP_1_DIRECTION: "CLOCKWISE"
     LAP_2_DIRECTION: "CLOCKWISE"
-    LAP_3_DIRECTION: "CLOCKWISE" # Dynamic override if mid-race swap is required
+    LAP_3_DIRECTION: "CLOCKWISE"
 
   # ==========================================
-  # 5. STATE MACHINE EXECUTION
+  # 6. PARKING CONFIGURATION (LIDAR-based)
+  # ==========================================
+  # These values are used by parking_controller.py
+  # They are hardcoded in the code, but you can override them here.
+  parking:
+    rear_wall_target_m: 0.05           # 5 cm from rear wall
+    side_wall_target_m: 0.10           # 10 cm from side wall
+    alignment_tolerance_m: 0.02        # 2 cm tolerance
+    approach_speed_mps: 0.10           # Speed during approach
+    reverse_speed_mps: -0.12           # Speed during reverse
+
+  # ==========================================
+  # 7. STATE MACHINE EXECUTION
   # ==========================================
   state_machine:
     STATE_1_INIT:
@@ -107,15 +130,15 @@ system_prompt_matrix:
     STATE_2_NAVIGATE:
       - Run Host Spatial Tracker (HuskyLens raw bounding box + Lidar fusion).
       - Check Ultrasonic Emergency Shield:
-          - If Distance < `front_stop`: Trigger Immediate Braking.
-          - If Distance < `front_left_safety` / `front_right_safety`: Execute Emergency Avoidance Steer & Apply Throttle Drop (0.6x).
+          - If Distance < `front_stop`: Reduce speed and steer according to traffic rule.
+          - If Distance < `critical_stop`: Reverse briefly then continue.
+          - If Distance < `front_left_safety` / `front_right_safety`: Steer away.
       - Maintain persistent map and filter out vision drops/flickers.
       - Steer vehicle relative to `active_target` (`RED` -> Right, `GREEN` -> Left).
-      - Track lap completion via odometry and wall geometry.
+      - Track lap completion via LIDAR corner detection + odometry fallback.
 
     STATE_3_TERMINATION:
       - If Challenge == "OPEN" and Laps == 3:
           - Target saved `start_pose` and perform smooth deceleration to full stop.
       - If Challenge == "OBSTACLE" and Laps == 3:
-          - Navigate to saved `parking_slot_geometry` and trigger 4-stage Parallel Parking sequence.
-
+          - Navigate to saved `parking_slot_geometry` and trigger 4-stage Parallel Parking sequence using LIDAR 360°.
