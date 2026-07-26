@@ -1,115 +1,98 @@
 """
-Ackermann steering controller.
-Converts (linear speed, yaw rate) -> (left rear speed, right rear speed)
-using Ackermann geometry. Compatible with BTS 7960, L298N, or TB6612.
+Advanced Steering Controller for Single Motor + Steering Servo.
 
-The ESP32 expects motor speeds via the serial bridge.
+Features:
+  - Low‑pass filter for smooth servo commands.
+  - Speed‑dependent steering angle limiting (safer at high speeds).
+  - Configurable max steering angle and smoothing factor.
+  - Send speed + steering angle to ESP32.
 """
 
 import math
 import logging
-from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class SteeringController:
-    def __init__(self, serial_bridge, wheelbase: float = 0.25,
-                 trackwidth: float = 0.15, max_speed: float = 0.5):
+    def __init__(self, serial_bridge,
+                 max_speed: float = 0.5,
+                 max_steer_rad: float = 0.524,   # ±30°
+                 smoothing_alpha: float = 0.25,
+                 steer_gain: float = 1.0):
         """
         Args:
-            serial_bridge: Serial bridge to ESP32 (for sending motor commands).
-            wheelbase: Distance between front and rear axles (meters).
-            trackwidth: Distance between left and right rear wheels (meters).
-            max_speed: Maximum linear speed (m/s). Used for clamping.
+            serial_bridge: Serial bridge to ESP32.
+            max_speed: Maximum speed (m/s).
+            max_steer_rad: Maximum steering angle (radians). Typical: 0.524 (30°).
+            smoothing_alpha: Low‑pass filter coefficient (0 = no change, 1 = instant).
+            steer_gain: Conversion factor from angular velocity (rad/s) to steering angle.
+                        Default 1.0 assumes angular velocity is already close to steering angle.
+                        Adjust if your car responds differently.
         """
         self.serial_bridge = serial_bridge
-        self.wheelbase = wheelbase
-        self.trackwidth = trackwidth
         self.max_speed = max_speed
+        self.max_steer_rad = max_steer_rad
+        self.smoothing_alpha = smoothing_alpha
+        self.steer_gain = steer_gain
 
-        # Maximum steering angle (mechanical limit of the car)
-        # Typical RC cars have about 30-35 degrees max
-        self.max_steer_rad = math.radians(30.0)
-
-        # Current wheel speeds (for debugging / logging)
-        self.current_left = 0.0
-        self.current_right = 0.0
+        # Internal state
+        self.current_speed = 0.0
+        self.current_steer = 0.0       # filtered steering angle
+        self.last_raw_steer = 0.0      # for smoothing
 
     def set_speed(self, linear: float, angular: float) -> None:
         """
         Set the robot's speed and steering.
 
         Args:
-            linear: Desired forward speed (m/s). Positive = forward, negative = reverse.
-            angular: Desired yaw rate (rad/s). Positive = turn left, negative = turn right.
+            linear: Forward speed (m/s). Positive = forward, negative = reverse.
+            angular: Angular velocity (rad/s). Positive = turn left.
         """
-        # 1. Clamp linear speed to max
+        # 1. Clamp speed
         linear = max(-self.max_speed, min(self.max_speed, linear))
 
-        # 2. Compute steering angle from yaw rate using bicycle model
-        # Formula: angular = (v / L) * tan(delta)  =>  delta = atan2(angular * L, v)
-        if abs(linear) < 0.001:
-            # If stationary, we cannot turn. Set both wheels to 0 and return.
-            self.current_left = 0.0
-            self.current_right = 0.0
-            self._send_command()
-            return
+        # 2. Speed‑dependent steering limiting (safer at high speed)
+        # At low speed, allow full steering angle. At max speed, reduce to 60% of max.
+        speed_fraction = abs(linear) / self.max_speed
+        steer_limit_factor = max(0.6, 1.0 - speed_fraction * 0.4)
+        current_max_steer = self.max_steer_rad * steer_limit_factor
 
-        # Compute front wheel steering angle (in radians)
-        steering_angle = math.atan2(angular * self.wheelbase, linear)
+        # 3. Map angular velocity to steering angle
+        raw_steer = angular * self.steer_gain
 
-        # Clamp steering angle to mechanical limits
-        steering_angle = max(-self.max_steer_rad, min(self.max_steer_rad, steering_angle))
+        # 4. Clamp raw steer to the dynamic limit
+        raw_steer = max(-current_max_steer, min(current_max_steer, raw_steer))
 
-        # 3. Ackermann speed calculation for rear wheels
-        # If steering angle is near zero, go straight.
-        if abs(steering_angle) < 0.001:
-            left_speed = linear
-            right_speed = linear
-        else:
-            # Turning radius R = L / tan(delta)
-            R = self.wheelbase / math.tan(steering_angle)
+        # 5. Apply low‑pass filter (smoothing) to prevent jerky movements
+        filtered_steer = (self.smoothing_alpha * raw_steer +
+                          (1 - self.smoothing_alpha) * self.last_raw_steer)
 
-            # Speeds for left and right rear wheels
-            # V_left = V * (R - T/2) / R
-            # V_right = V * (R + T/2) / R
-            left_speed = linear * (R - self.trackwidth / 2.0) / R
-            right_speed = linear * (R + self.trackwidth / 2.0) / R
+        # 6. Store for next iteration
+        self.last_raw_steer = filtered_steer
+        self.current_speed = linear
+        self.current_steer = filtered_steer
 
-        # 4. Clamp individual wheel speeds to max_speed (for safety)
-        self.current_left = max(-self.max_speed, min(self.max_speed, left_speed))
-        self.current_right = max(-self.max_speed, min(self.max_speed, right_speed))
-
-        # 5. Send command to ESP32
+        # 7. Send command
         self._send_command()
 
-        # Debug logging (can be enabled for tuning)
-        # logger.debug(f"Steering: linear={linear:.2f}, angular={angular:.2f} -> "
-        #              f"steer={math.degrees(steering_angle):.1f}°, "
-        #              f"left={self.current_left:.2f}, right={self.current_right:.2f}")
-
     def _send_command(self) -> None:
-        """
-        Send motor speeds to ESP32 via serial bridge.
-        The ESP32 expects a JSON message with 'left' and 'right' speeds.
-        """
+        """Send speed and filtered steering angle to ESP32."""
         msg = {
-            'type': 'motor_command',
-            'data': {
-                'left': self.current_left,
-                'right': self.current_right
-            }
+            'type': 'cmd',
+            'speed': self.current_speed,
+            'steering': self.current_steer
         }
         self.serial_bridge.send(msg)
 
     def stop(self) -> None:
-        """Emergency stop: set both motors to 0."""
-        self.current_left = 0.0
-        self.current_right = 0.0
+        """Emergency stop: set speed to 0 and center steering."""
+        self.current_speed = 0.0
+        self.current_steer = 0.0
+        self.last_raw_steer = 0.0
         self._send_command()
-        logger.info("Motors stopped")
+        logger.info("Motors stopped, steering centered")
 
-    def get_wheel_speeds(self) -> Tuple[float, float]:
-        """Return the last commanded left and right wheel speeds (m/s)."""
-        return (self.current_left, self.current_right)
+    def get_current_state(self):
+        """Return current speed and steering angle (for debugging)."""
+        return self.current_speed, self.current_steer
