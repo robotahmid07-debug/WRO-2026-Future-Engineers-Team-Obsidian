@@ -244,6 +244,16 @@ class StateMachine:
 
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
+        
+        # Determine target direction from traffic light
+        if confirmed_objects:
+            target = confirmed_objects[0]
+            angular = self._get_angular_velocity_from_color(target.color_id)
+            # Tell emergency shield which direction we want to go
+            self.emergency.set_target_steer_direction(math.copysign(1.0, angular) if angular != 0 else 0.0)
+        else:
+            self.emergency.set_target_steer_direction(0.0)
+            self.emergency.set_target_steer_direction(0.0)
         # 1. Update emergency shield
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
