@@ -1,7 +1,8 @@
-  # ==========================================
-  # Written by Tahmed Ahmed
-  # Update date : 26-7-26
-  # ==========================================
+# ==========================================
+#  Written by Team Obsidian
+#  Update date : 2026-07-26
+# ==========================================
+
 system_prompt_matrix:
   version: "2026.3"
   competition: "WRO Future Engineers"
@@ -9,8 +10,8 @@ system_prompt_matrix:
   # ==========================================
   # 0. CHALLENGE SELECTION
   # ==========================================
-  # This is optional – if set, it overrides the hardware switch.
-  # Leave commented to use the hardware switch (GPIO 22).
+  # This is optional – if set, it overrides the hardware switch (GPIO 22).
+  # Leave commented to use the hardware switch.
   # active_challenge: "open"   # "open" or "obstacle"
 
   # ==========================================
@@ -88,7 +89,7 @@ system_prompt_matrix:
       front_stop: 12.0                  # Start reducing speed
       front_left_safety: 18.0           # Steer right if left side close
       front_right_safety: 18.0          # Steer left if right side close
-      critical_stop: 8.0                # <-- NEW: Reverse if closer than this
+      critical_stop: 8.0                # Reverse if closer than this
     dynamic_throttle:
       enable_speed_dampening: True
       dampened_speed_factor: 0.60
@@ -102,7 +103,7 @@ system_prompt_matrix:
     INVERT_COLORS_MID_RACE: False
 
   # ==========================================
-  # 5. NAVIGATION & LAP COUNTING
+  # 5. NAVIGATION & LAP COUNTING (BASE)
   # ==========================================
   navigation_matrix:
     TOTAL_REQUIRED_LAPS: 3
@@ -113,7 +114,7 @@ system_prompt_matrix:
   # ==========================================
   # 6. PARKING CONFIGURATION (LIDAR-based)
   # ==========================================
-  # These values are used by parking_controller.py
+  # These values are used by parking_controller.py.
   # They are hardcoded in the code, but you can override them here.
   parking:
     rear_wall_target_m: 0.05           # 5 cm from rear wall
@@ -123,7 +124,7 @@ system_prompt_matrix:
     reverse_speed_mps: -0.12           # Speed during reverse
 
   # ==========================================
-  # 7. STATE MACHINE EXECUTION
+  # 7. STATE MACHINE EXECUTION (DESCRIPTIVE)
   # ==========================================
   state_machine:
     STATE_1_INIT:
@@ -146,3 +147,54 @@ system_prompt_matrix:
           - Target saved `start_pose` and perform smooth deceleration to full stop.
       - If Challenge == "OBSTACLE" and Laps == 3:
           - Navigate to saved `parking_slot_geometry` and trigger 4-stage Parallel Parking sequence using LIDAR 360°.
+
+  # ==========================================
+  # 8. MAPPING CONFIGURATION
+  # ==========================================
+  mapping:
+    use_mapping: True                 # Enable/disable mapping entirely
+    save_map_to_disk: True            # Save map after each round (non‑volatile)
+    load_map_from_disk: True          # Load existing map at startup
+    force_rebuild: False              # If True, delete existing map and rebuild fresh
+
+  # ==========================================
+  # 9. SURPRISE RULE (LAP X → LAP X+1)
+  # ==========================================
+  surprise_rule:
+    enabled: True                     # Enable/disable the rule
+    trigger_lap: 2                    # Which lap triggers the rule (default 2)
+    color_to_continue: "GREEN"        # If last traffic light = this, continue same direction
+    color_to_reverse: "RED"           # If last traffic light = this, reverse direction
+    fallback_direction: "REVERSE"     # If no traffic light detected → "REVERSE" or "SAME"
+    turnaround_speed: 0.1             # Speed during 180° turn (m/s)
+
+  # ==========================================
+  # 10. LAP COUNTING & ODOMETRY FALLBACK
+  # ==========================================
+  lap_counting:
+    lap_length_m: 12.0                # Full lap distance (calibrate to your track)
+    section_fallback_timeout_s: 3.0   # Time without corner detection before using odometry section fallback
+    emergency_lap_margin_m: 0.2       # Margin below full lap to trigger emergency lap completion
+
+  # ==========================================
+  # 11. VEHICLE PHYSICAL PARAMETERS
+  # ==========================================
+  vehicle:
+    wheelbase_m: 0.25                 # Distance between front and rear axles (meters)
+    max_speed_mps: 0.5                # Maximum forward speed (m/s)
+    max_steer_rad: 0.524              # Maximum steering angle (radians) ~30°
+
+  # ==========================================
+  # 12. NAVIGATION & BEHAVIOR
+  # ==========================================
+  navigation:
+    base_speed_mps: 0.3               # Cruise speed during navigation
+    steer_magnitude_radps: 0.3        # Yaw rate when turning for traffic lights
+    wall_follow_gain: 0.25            # Proportional gain for wall‑following
+
+  # ==========================================
+  # 13. VISION (HUSKYLENS)
+  # ==========================================
+  vision:
+    color_red_id: 1                   # Learned ID for RED on HuskyLens
+    color_green_id: 2                 # Learned ID for GREEN on HuskyLens
