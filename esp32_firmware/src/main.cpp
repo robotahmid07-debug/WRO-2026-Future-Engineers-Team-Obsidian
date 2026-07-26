@@ -1,64 +1,74 @@
 /**
- * ESP32-S3 Firmware for WRO Future Engineers 2026.
+ * ESP32-S3 Firmware for WRO Future Engineers 2026
  * 
- * - Reads ultrasonic sensors and encoders.
- * - Controls motors via PWM.
- * - Communicates with Raspberry Pi over UART.
+ * Hardware:
+ *   - 1 DC drive motor (with encoder) + 1 steering servo
+ *   - 3 ultrasonic sensors (front, front-left, front-right)
+ *   - UART communication with Raspberry Pi (JSON)
+ * 
+ * Communication Protocol:
+ *   - Received JSON: {"type":"cmd","speed":0.3,"steering":0.15}
+ *   - Sent JSON: {"type":"ultrasonic","data":{"front":12.5,...},"checksum":123}
  */
 
 #include <Arduino.h>
-#include <Wire.h>
 #include <HardwareSerial.h>
 #include <ESP32Encoder.h>
+#include <Servo.h>
 #include "pin_definitions.h"
 
-// Serial to Pi (use UART2)
+// ============================================================
+// Constants & Configuration
+// ============================================================
+
 #define UART_BAUD 460800
-
-// Ultrasonic measurement timeout (us)
-#define ULTRASONIC_TIMEOUT 30000
-
-// Motor PWM frequency and resolution
 #define PWM_FREQ 20000
-#define PWM_RES 10  // 0-1023
-
-// Motor max speed (duty cycle)
+#define PWM_RES 10            // 0-1023
 #define MAX_DUTY 1023
+#define MAX_SPEED_MPS 0.5     // m/s, for mapping speed to duty
+#define ULTRASONIC_TIMEOUT 30000  // µs
 
-// Encoder objects
-ESP32Encoder encoderLeft;
-ESP32Encoder encoderRight;
+// Steering servo limits (mechanical)
+#define SERVO_CENTER 90       // degrees (neutral)
+#define SERVO_MAX_ANGLE 90    // ±90° from center (adjust if needed)
+#define MAX_STEER_RAD 0.524   // ±30° in radians
 
-// Ultrasonic distances (cm)
+// ============================================================
+// Objects & Variables
+// ============================================================
+
+Servo steeringServo;
+ESP32Encoder encoder;
+
+// Ultrasonic sensor distances (cm)
 volatile float front_dist = 999.0;
 volatile float front_left_dist = 999.0;
 volatile float front_right_dist = 999.0;
 
-// Last time sensor data sent
+// Command variables (updated by UART)
+volatile float target_speed = 0.0;       // m/s, positive = forward
+volatile float target_steer = 0.0;       // radians, positive = left
+volatile bool new_cmd = false;
+
+// Timing
 unsigned long last_sensor_send = 0;
-const unsigned long SENSOR_SEND_INTERVAL = 50; // ms
+const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms
 
-// Motor speed commands (from Pi)
-volatile float target_left = 0.0;
-volatile float target_right = 0.0;
-volatile bool new_motor_cmd = false;
-
-// Function prototypes
-void readUltrasonic();
-void sendSensorData();
-void processMotorCommand(String json);
+// ============================================================
+// Setup
+// ============================================================
 
 void setup() {
-    // Initialize serial for debugging (UART0)
+    // Debug serial (USB)
     Serial.begin(115200);
     while (!Serial) delay(10);
-    Serial.println("ESP32-S3 WRO Robot Firmware Starting...");
+    Serial.println("ESP32-S3 WRO Robot Firmware v2.0 (Single Motor + Servo)");
 
-    // Initialize UART2 for Pi communication
+    // UART2 to Raspberry Pi
     Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
     Serial2.setTimeout(10);
 
-    // Setup ultrasonic pins
+    // Ultrasonic pins
     pinMode(FRONT_TRIG, OUTPUT);
     pinMode(FRONT_ECHO, INPUT);
     pinMode(FRONT_LEFT_TRIG, OUTPUT);
@@ -66,26 +76,30 @@ void setup() {
     pinMode(FRONT_RIGHT_TRIG, OUTPUT);
     pinMode(FRONT_RIGHT_ECHO, INPUT);
 
-    // Setup motor PWM
+    // Motor PWM and Direction
     ledcSetup(0, PWM_FREQ, PWM_RES);
-    ledcAttachPin(MOTOR_PWM_A, 0);
-    ledcSetup(1, PWM_FREQ, PWM_RES);
-    ledcAttachPin(MOTOR_PWM_B, 1);
-    pinMode(MOTOR_DIR_A, OUTPUT);
-    pinMode(MOTOR_DIR_B, OUTPUT);
+    ledcAttachPin(MOTOR_PWM, 0);
+    pinMode(MOTOR_DIR, OUTPUT);
 
-    // Setup encoders
+    // Servo
+    steeringServo.attach(SERVO_PWM);
+    steeringServo.write(SERVO_CENTER);
+    delay(200);
+
+    // Encoder (only one, on the drive motor or axle)
     ESP32Encoder::useInternalWeakPullResistors = UP;
-    encoderLeft.attachHalfQuad(ENC_A_A, ENC_A_B);
-    encoderRight.attachHalfQuad(ENC_B_A, ENC_B_B);
-    encoderLeft.clearCount();
-    encoderRight.clearCount();
+    encoder.attachHalfQuad(ENC_A_A, ENC_A_B);
+    encoder.clearCount();
 
     Serial.println("Setup complete.");
 }
 
+// ============================================================
+// Main Loop
+// ============================================================
+
 void loop() {
-    // Read ultrasonic sensors every 20 ms
+    // Read ultrasonics every 20 ms
     static unsigned long last_ultra = 0;
     if (millis() - last_ultra > 20) {
         last_ultra = millis();
@@ -98,23 +112,27 @@ void loop() {
         sendSensorData();
     }
 
-    // Process incoming motor commands from Pi
+    // Process incoming commands from Pi
     while (Serial2.available()) {
         String line = Serial2.readStringUntil('\n');
         if (line.length() > 0) {
-            processMotorCommand(line);
+            processCommand(line);
         }
     }
 
-    // Apply motor speeds if new command received
-    if (new_motor_cmd) {
-        applyMotorSpeeds(target_left, target_right);
-        new_motor_cmd = false;
+    // Apply motor and servo if new command received
+    if (new_cmd) {
+        applyMotorSpeed(target_speed);
+        applyServoAngle(target_steer);
+        new_cmd = false;
     }
 
-    // Small delay to yield
-    delay(1);
+    delay(1);  // yield to other tasks
 }
+
+// ============================================================
+// Ultrasonic Reading
+// ============================================================
 
 void readUltrasonic() {
     // Front
@@ -124,11 +142,7 @@ void readUltrasonic() {
     delayMicroseconds(10);
     digitalWrite(FRONT_TRIG, LOW);
     long duration = pulseIn(FRONT_ECHO, HIGH, ULTRASONIC_TIMEOUT);
-    if (duration > 0) {
-        front_dist = duration * 0.034 / 2.0;
-    } else {
-        front_dist = 999.0;
-    }
+    front_dist = (duration > 0) ? duration * 0.034 / 2.0 : 999.0;
 
     // Front-left
     digitalWrite(FRONT_LEFT_TRIG, LOW);
@@ -137,11 +151,7 @@ void readUltrasonic() {
     delayMicroseconds(10);
     digitalWrite(FRONT_LEFT_TRIG, LOW);
     duration = pulseIn(FRONT_LEFT_ECHO, HIGH, ULTRASONIC_TIMEOUT);
-    if (duration > 0) {
-        front_left_dist = duration * 0.034 / 2.0;
-    } else {
-        front_left_dist = 999.0;
-    }
+    front_left_dist = (duration > 0) ? duration * 0.034 / 2.0 : 999.0;
 
     // Front-right
     digitalWrite(FRONT_RIGHT_TRIG, LOW);
@@ -150,84 +160,91 @@ void readUltrasonic() {
     delayMicroseconds(10);
     digitalWrite(FRONT_RIGHT_TRIG, LOW);
     duration = pulseIn(FRONT_RIGHT_ECHO, HIGH, ULTRASONIC_TIMEOUT);
-    if (duration > 0) {
-        front_right_dist = duration * 0.034 / 2.0;
-    } else {
-        front_right_dist = 999.0;
-    }
+    front_right_dist = (duration > 0) ? duration * 0.034 / 2.0 : 999.0;
 }
 
-void sendSensorData() {
-    // Build JSON: {"type":"ultrasonic","data":{"front":...,"front_left":...,"front_right":...},"checksum":...}
-    // For simplicity, we send a comma-separated string with checksum.
-    // But using JSON is better; we'll implement a simple JSON-like format.
-    // We'll also include encoder counts.
-    int64_t encL = encoderLeft.getCount();
-    int64_t encR = encoderRight.getCount();
+// ============================================================
+// Send Sensor Data (JSON)
+// ============================================================
 
+void sendSensorData() {
+    int64_t enc = encoder.getCount();
+
+    // Build JSON without checksum first
     String msg = "{";
     msg += "\"type\":\"ultrasonic\",";
     msg += "\"data\":{";
     msg += "\"front\":" + String(front_dist) + ",";
     msg += "\"front_left\":" + String(front_left_dist) + ",";
     msg += "\"front_right\":" + String(front_right_dist) + ",";
-    msg += "\"enc_left\":" + String(encL) + ",";
-    msg += "\"enc_right\":" + String(encR);
+    msg += "\"enc\":" + String(enc);
     msg += "}";
-    // Checksum (simple sum of char codes)
+
+    // Compute simple checksum (sum of char codes)
     int sum = 0;
-    for (int i = 0; i < msg.length(); i++) {
-        sum += msg[i];
-    }
+    for (int i = 0; i < msg.length(); i++) sum += msg[i];
     msg += ",\"checksum\":" + String(sum);
     msg += "}\n";
+
     Serial2.print(msg);
 }
 
-void processMotorCommand(String json) {
-    // Expect: {"type":"motor_command","data":{"left":0.12,"right":0.34},"checksum":123}
-    // Very basic parsing (assume format)
-    int leftIdx = json.indexOf("\"left\":");
-    int rightIdx = json.indexOf("\"right\":");
-    if (leftIdx == -1 || rightIdx == -1) return;
+// ============================================================
+// Command Processing (JSON)
+// ============================================================
 
-    // Extract numbers
-    float left_val = 0.0, right_val = 0.0;
-    sscanf(json.substring(leftIdx + 7).c_str(), "%f", &left_val);
-    sscanf(json.substring(rightIdx + 8).c_str(), "%f", &right_val);
+void processCommand(String json) {
+    // Expected format: {"type":"cmd","speed":0.30,"steering":0.15}
+    // speed: m/s (negative = reverse)
+    // steering: radians (positive = left turn)
 
-    target_left = left_val;
-    target_right = right_val;
-    new_motor_cmd = true;
+    float speed = 0.0, steer = 0.0;
+    int idxSpeed = json.indexOf("\"speed\":");
+    int idxSteer = json.indexOf("\"steering\":");
+    if (idxSpeed != -1) {
+        sscanf(json.substring(idxSpeed + 8).c_str(), "%f", &speed);
+    }
+    if (idxSteer != -1) {
+        sscanf(json.substring(idxSteer + 11).c_str(), "%f", &steer);
+    }
 
-    // Optional: verify checksum
-    // For production, implement proper checksum verification.
+    target_speed = speed;
+    target_steer = steer;
+    new_cmd = true;
 }
 
-void applyMotorSpeeds(float left, float right) {
-    // Convert speed (m/s) to PWM duty.
-    // Map speed to PWM: max_speed = 0.5 m/s -> duty 1023.
-    const float MAX_SPEED = 0.5;
-    int duty_left = constrain(mapSpeedToDuty(left, MAX_SPEED), -MAX_DUTY, MAX_DUTY);
-    int duty_right = constrain(mapSpeedToDuty(right, MAX_SPEED), -MAX_DUTY, MAX_DUTY);
+// ============================================================
+// Motor Control
+// ============================================================
 
-    // Set direction and PWM
-    setMotor(MOTOR_PWM_A, MOTOR_DIR_A, duty_left);
-    setMotor(MOTOR_PWM_B, MOTOR_DIR_B, duty_right);
+void applyMotorSpeed(float speed_mps) {
+    int duty = mapSpeedToDuty(speed_mps, MAX_SPEED_MPS);
+    if (duty >= 0) {
+        digitalWrite(MOTOR_DIR, HIGH);
+        ledcWrite(0, duty);
+    } else {
+        digitalWrite(MOTOR_DIR, LOW);
+        ledcWrite(0, -duty);
+    }
 }
 
 int mapSpeedToDuty(float speed, float max_speed) {
+    // Clamp speed to ±max_speed
     if (speed > max_speed) speed = max_speed;
     if (speed < -max_speed) speed = -max_speed;
     return (int)((speed / max_speed) * MAX_DUTY);
 }
 
-void setMotor(int pwmPin, int dirPin, int duty) {
-    if (duty >= 0) {
-        digitalWrite(dirPin, HIGH);
-        ledcWrite(pwmPin, duty);
-    } else {
-        digitalWrite(dirPin, LOW);
-        ledcWrite(pwmPin, -duty);
-    }
+// ============================================================
+// Servo Steering Control
+// ============================================================
+
+void applyServoAngle(float angle_rad) {
+    // Clamp steering angle to mechanical limits
+    float clamped = constrain(angle_rad, -MAX_STEER_RAD, MAX_STEER_RAD);
+    // Map radians to servo pulse (0-180)
+    // angle_rad = 0 -> 90°, positive -> left, negative -> right
+    int angle_deg = SERVO_CENTER + (int)((clamped / MAX_STEER_RAD) * 90.0);
+    angle_deg = constrain(angle_deg, 0, 180);
+    steeringServo.write(angle_deg);
 }
