@@ -244,28 +244,7 @@ class StateMachine:
 
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
-        
-        # Determine target direction from traffic light
-        if confirmed_objects:
-            target = confirmed_objects[0]
-            angular = self._get_angular_velocity_from_color(target.color_id)
-            # Tell emergency shield which direction we want to go
-            self.emergency.set_target_steer_direction(math.copysign(1.0, angular) if angular != 0 else 0.0)
-        else:
-            self.emergency.set_target_steer_direction(0.0)
-            self.emergency.set_target_steer_direction(0.0)
-        # 1. Update emergency shield
-        self.emergency.update()
-        emergency_actions = self.emergency.get_emergency_actions()
-
-        # 2. Check emergency stop
-        if emergency_actions.get('brake', False):
-            self.steering.stop()
-            self.state = RobotState.EMERGENCY_STOP
-            logger.warning("Emergency stop triggered")
-            return
-
-        # 3. Get color detections from HuskyLens
+        # 1. Get color detections from HuskyLens
         color_blocks = self.vision.get_latest_colors()
         detections = []
         for color_block in color_blocks:
@@ -281,23 +260,38 @@ class StateMachine:
         if detections:
             self.spatial_map.update(detections)
 
+        # 2. Get confirmed objects from spatial map
         confirmed_objects = self.spatial_map.get_confirmed_objects()
-        if confirmed_objects:
-            target = confirmed_objects[0]  # closest
-            angular = self._get_angular_velocity_from_color(target.color_id)
-        else:
-            angular = 0.0
 
-        # Apply emergency shield steering offset
-        angular += emergency_actions.get('steer_offset', 0.0)
+        # 3. Tell emergency shield the target direction based on traffic light
+        if confirmed_objects:
+            target = confirmed_objects[0]
+            angular = self._get_angular_velocity_from_color(target.color_id)
+            # Tell emergency shield which direction we want to go
+            self.emergency.set_target_steer_direction(math.copysign(1.0, angular) if angular != 0 else 0.0)
+        else:
+            self.emergency.set_target_steer_direction(0.0)
+
+        # 4. Update emergency shield
+        self.emergency.update()
+        emergency_actions = self.emergency.get_emergency_actions()
+
+        # 5. Check emergency stop
+        if emergency_actions.get('brake', False):
+            self.steering.stop()
+            self.state = RobotState.EMERGENCY_STOP
+            logger.warning("Emergency stop triggered")
+            return
+
+        # 6. Calculate steering from emergency actions
+        angular = emergency_actions.get('steer_offset', 0.0)
         throttle = emergency_actions.get('throttle_factor', 1.0)
         linear = self.BASE_SPEED * throttle
 
-        # 4. Apply steering (Ackermann)
+        # 7. Apply steering (Ackermann)
         self.steering.set_speed(linear, angular)
 
-        # 5. Update localization with LIDAR points for mapping
-        # Get thread‑safe LIDAR snapshot
+        # 8. Update localization with LIDAR points for mapping
         scan_data = self.lidar.get_scan_snapshot()
         lidar_scan = [(ang, dist) for ang, dist in scan_data.items()]
         # Use a subset to reduce processing (every 5 degrees)
@@ -306,7 +300,7 @@ class StateMachine:
         steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.steering.wheelbase, linear)
         self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
 
-        # 6. Update lap counting
+        # 9. Update lap counting
         self._update_lap_count()
 
     def _termination_state(self):
