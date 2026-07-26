@@ -5,10 +5,12 @@ Features:
   - Low‑pass filter for smooth servo commands.
   - Speed‑dependent steering angle limiting (safer at high speeds).
   - Configurable max steering angle and smoothing factor.
-  - Send speed + steering angle to ESP32.
+  - Send speed + steering angle to ESP32 via serial bridge.
+  - turn_around() method for 180° U‑turn (used by surprise rule).
 """
 
 import math
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -96,3 +98,45 @@ class SteeringController:
     def get_current_state(self):
         """Return current speed and steering angle (for debugging)."""
         return self.current_speed, self.current_steer
+
+    # ------------------------------
+    # NEW METHOD: turn_around()
+    # ------------------------------
+    def turn_around(self, speed: float = 0.1) -> None:
+        """
+        Execute a 180° turn in place.
+        Steers fully to one side and reverses slightly,
+        then centers steering.
+
+        This is used for the surprise rule when the direction must be reversed.
+
+        Args:
+            speed: Reverse speed during the turn (m/s). Should be small for safety.
+        """
+        logger.info(f"Executing 180° turn at speed {speed} m/s")
+
+        # 1. Stop and center steering first
+        self.stop()
+        time.sleep(0.2)
+
+        # 2. Steer fully to one side (e.g., left)
+        # We'll use the max steering angle.
+        steer_angle = self.max_steer_rad * 0.9   # 90% of max to be safe
+        # We'll send a command with zero speed but full steering to set the servo
+        self.set_speed(0.0, steer_angle / self.steer_gain)  # angular command
+        time.sleep(0.3)  # allow servo to move
+
+        # 3. Reverse slowly while maintaining the steering angle
+        # We'll use the given speed (negative for reverse)
+        reverse_speed = -abs(speed)   # ensure it's negative
+        # Send reverse command while keeping the same steering angle
+        # We need to convert the steering angle back to angular velocity
+        angular_cmd = steer_angle / self.steer_gain
+        self.set_speed(reverse_speed, angular_cmd)
+        # Duration depends on the car's turning radius – 1.5 sec is typical.
+        # This may need tuning; we can add a config parameter later.
+        time.sleep(1.5)
+
+        # 4. Stop and center steering
+        self.stop()
+        logger.info("180° turn complete")
