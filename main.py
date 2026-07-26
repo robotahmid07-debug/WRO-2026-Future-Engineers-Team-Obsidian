@@ -2,8 +2,8 @@
 """
 Primary execution entrypoint for WRO Future Engineers 2026.
 Reads a hardware switch to select Open or Obstacle challenge.
-Uses WallMapper for map‑based localization, smart obstacle avoidance,
-and LIDAR‑based parallel parking.
+Handles map persistence (save/load/force rebuild) and all initializations.
+All calibratable parameters are read from config.
 """
 
 import sys
@@ -79,10 +79,12 @@ def main():
     vision = HuskyLensReader(i2c_bus=1, poll_interval=0.05)
     if not vision.open():
         logger.error("Failed to initialize HuskyLens V2. Check I2C connection.")
+        # Continue anyway – vision is critical, but we don't exit to allow debugging.
+        # In production you may want to exit if vision fails.
     else:
         logger.info("HuskyLens V2 initialized")
 
-    # LIDAR – used for mapping, corner detection, traffic light fusion, and parking
+    # LIDAR
     lidar = LidarFusion(port='/dev/ttyUSB1')
     lidar.open()
     logger.info("LIDAR initialized")
@@ -93,53 +95,82 @@ def main():
     logger.info("Spatial map initialized")
 
     # ------------------------------------------------------------------
-    # 4. Localization with WallMapper (map correction)
+    # 4. Initialize localization with WallMapper
     # ------------------------------------------------------------------
-    localization = Localization(lidar, config.zone_management, use_map_correction=True)
-    logger.info("Localization initialized (map correction enabled)")
+    # use_map_correction is read from config.mapping.use_mapping
+    localization = Localization(
+        lidar,
+        config,
+        use_map_correction=config.mapping.use_mapping
+    )
+    logger.info("Localization initialized (map correction enabled: %s)",
+                config.mapping.use_mapping)
 
     # ------------------------------------------------------------------
-    # 5. Ackermann steering controller
+    # 5. Handle map persistence (save/load/force rebuild)
+    # ------------------------------------------------------------------
+    map_file = Path(__file__).parent / 'saved_map.pkl'
+
+    # Force rebuild: delete existing map file
+    if config.mapping.force_rebuild and map_file.exists():
+        try:
+            map_file.unlink()
+            logger.info("Force rebuild: removed existing map file")
+        except Exception as e:
+            logger.warning(f"Could not delete map file: {e}")
+
+    # Load map if enabled
+    if config.mapping.load_map_from_disk and map_file.exists():
+        try:
+            localization.load_map(str(map_file))
+            logger.info("Map loaded from disk")
+        except Exception as e:
+            logger.warning(f"Failed to load map: {e}")
+    elif config.mapping.load_map_from_disk and not map_file.exists():
+        logger.info("No saved map found; will build fresh during Lap 1")
+    else:
+        logger.info("Map loading disabled by configuration")
+
+    # ------------------------------------------------------------------
+    # 6. Initialize steering controller (Ackermann – one motor + servo)
     # ------------------------------------------------------------------
     steering = SteeringController(
         serial_bridge,
-        wheelbase=0.25,     # adjust to your car's wheelbase
-        trackwidth=0.15,    # adjust to your car's track width
-        max_speed=0.5       # max forward speed (m/s)
+        max_speed=config.vehicle.max_speed_mps,
+        max_steer_rad=config.vehicle.max_steer_rad,
+        smoothing_alpha=0.25,      # can be made configurable if needed
+        steer_gain=1.0             # can be made configurable if needed
     )
     logger.info("Steering controller initialized (Ackermann)")
 
     # ------------------------------------------------------------------
-    # 6. Smart Emergency Shield (traffic‑rule‑aware obstacle avoidance)
+    # 7. Emergency shield (smart avoidance)
     # ------------------------------------------------------------------
     emergency = EmergencyShield(config.ultrasonic_emergency_shield, serial_bridge)
-    logger.info("Emergency shield initialized (smart avoidance)")
+    logger.info("Emergency shield initialized")
 
     # ------------------------------------------------------------------
-    # 7. LIDAR‑based Parking Controller (uses 360° LIDAR for precision)
+    # 8. LIDAR‑based parking controller
     # ------------------------------------------------------------------
-    # NOTE: We pass `lidar` here, NOT `emergency` – LIDAR gives accurate 360° distances.
     parking = ParkingController(localization, steering, lidar, config.zone_management)
-    logger.info("Parking controller initialized (LIDAR‑based)")
+    logger.info("Parking controller initialized")
 
     # ------------------------------------------------------------------
-    # 8. State Machine
+    # 9. State Machine
     # ------------------------------------------------------------------
-    fsm = StateMachine(config, serial_bridge, localization, vision, lidar,
-                       spatial_map, emergency, steering, parking,
-                       challenge=challenge)
+    fsm = StateMachine(
+        config,
+        serial_bridge,
+        localization,
+        vision,
+        lidar,
+        spatial_map,
+        emergency,
+        steering,
+        parking,
+        challenge=challenge
+    )
     logger.info("State machine initialized with %s challenge", challenge)
-
-    # ------------------------------------------------------------------
-    # 9. Optional: Load a previously saved map (if available)
-    # ------------------------------------------------------------------
-    map_file = Path(__file__).parent / 'saved_map.pkl'
-    if map_file.exists() and localization.is_map_ready():
-        try:
-            localization.load_map(str(map_file))
-            logger.info("Saved map loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load map: {e}")
 
     # ------------------------------------------------------------------
     # 10. Setup signal handlers and main loop (20 Hz)
@@ -170,14 +201,16 @@ def main():
             time.sleep(0.1)
 
     # ------------------------------------------------------------------
-    # 11. Optional: Save the map for next run (if built)
+    # 11. Save map if enabled
     # ------------------------------------------------------------------
-    if localization.is_map_ready():
+    if config.mapping.save_map_to_disk and localization.is_map_ready():
         try:
             localization.save_map(str(map_file))
-            logger.info("Map saved for next run")
+            logger.info("Map saved to disk")
         except Exception as e:
             logger.warning(f"Failed to save map: {e}")
+    elif not config.mapping.save_map_to_disk:
+        logger.info("Map saving disabled by configuration")
 
     # ------------------------------------------------------------------
     # 12. Cleanup
