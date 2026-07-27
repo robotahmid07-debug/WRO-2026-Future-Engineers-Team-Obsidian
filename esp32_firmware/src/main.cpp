@@ -31,7 +31,7 @@
 #define PWM_FREQ 20000
 #define PWM_RES 10                // 0-1023
 #define MAX_DUTY 1023
-#define MAX_SPEED_MPS 1.0         // Must match YAML vehicle.max_speed_mps
+#define MAX_SPEED_MPS 1.5         // Must match YAML vehicle.max_speed_mps
 #define ULTRASONIC_TIMEOUT 30000  // µs (30 ms)
 
 #define SERVO_CENTER 90           // degrees (neutral)
