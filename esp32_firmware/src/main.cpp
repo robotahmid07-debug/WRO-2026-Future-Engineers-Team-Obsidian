@@ -2,19 +2,25 @@
  * ESP32-S3 Firmware for WRO Future Engineers 2026
  * 
  * Hardware:
- *   - 1 DC drive motor (with encoder) + 1 steering servo
+ *   - 1 DC drive motor + 1 steering servo
  *   - 3 ultrasonic sensors (front, front-left, front-right)
- *   - UART communication with Raspberry Pi (JSON)
+ *   - BNO086 IMU (I2C) for yaw rate (200 Hz)
+ *   - UART communication with Raspberry Pi (JSON, 460800 baud)
  * 
- * Communication Protocol:
+ * Communication:
  *   - Received JSON: {"type":"cmd","speed":0.3,"steering":0.15}
- *   - Sent JSON: {"type":"ultrasonic","data":{"front":12.5,...},"checksum":123}
+ *   - Sent JSON: {"type":"sensor_data","data":{"front":12.5,...},"checksum":123}
  */
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <ESP32Encoder.h>
 #include <Servo.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
 #include "pin_definitions.h"
 
 // ============================================================
@@ -23,15 +29,13 @@
 
 #define UART_BAUD 460800
 #define PWM_FREQ 20000
-#define PWM_RES 10            // 0-1023
+#define PWM_RES 10                // 0-1023
 #define MAX_DUTY 1023
-#define MAX_SPEED_MPS 1.5     // m/s, for mapping speed to duty
-#define ULTRASONIC_TIMEOUT 30000  // µs
+#define MAX_SPEED_MPS 1.0         // Must match YAML vehicle.max_speed_mps
+#define ULTRASONIC_TIMEOUT 30000  // µs (30 ms)
 
-// Steering servo limits (mechanical)
-#define SERVO_CENTER 90       // degrees (neutral)
-#define SERVO_MAX_ANGLE 90    // ±90° from center (adjust if needed)
-#define MAX_STEER_RAD 0.524   // ±30° in radians
+#define SERVO_CENTER 90           // degrees (neutral)
+#define MAX_STEER_RAD 0.524       // ±30° in radians
 
 // ============================================================
 // Objects & Variables
@@ -40,19 +44,25 @@
 Servo steeringServo;
 ESP32Encoder encoder;
 
-// Ultrasonic sensor distances (cm)
+// Ultrasonic distances (cm)
 volatile float front_dist = 999.0;
 volatile float front_left_dist = 999.0;
 volatile float front_right_dist = 999.0;
 
-// Command variables (updated by UART)
+// IMU
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
+volatile float imu_yaw_rate = 0.0;   // rad/s (latest reading)
+
+// Command variables (updated by UART from Pi)
 volatile float target_speed = 0.0;       // m/s, positive = forward
 volatile float target_steer = 0.0;       // radians, positive = left
 volatile bool new_cmd = false;
 
 // Timing
 unsigned long last_sensor_send = 0;
-const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms
+const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms (20 Hz)
+unsigned long last_imu_read = 0;
+const unsigned long IMU_READ_INTERVAL = 5;      // ms (200 Hz)
 
 // ============================================================
 // Setup
@@ -62,11 +72,12 @@ void setup() {
     // Debug serial (USB)
     Serial.begin(115200);
     while (!Serial) delay(10);
-    Serial.println("ESP32-S3 WRO Robot Firmware v2.0 (Single Motor + Servo)");
+    Serial.println("ESP32-S3 WRO Robot Firmware v3.0 (with IMU)");
 
     // UART2 to Raspberry Pi
     Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
     Serial2.setTimeout(10);
+    Serial.println("UART2 initialized to Pi");
 
     // Ultrasonic pins
     pinMode(FRONT_TRIG, OUTPUT);
@@ -80,18 +91,28 @@ void setup() {
     ledcSetup(0, PWM_FREQ, PWM_RES);
     ledcAttachPin(MOTOR_PWM, 0);
     pinMode(MOTOR_DIR, OUTPUT);
+    digitalWrite(MOTOR_DIR, LOW);
 
     // Servo
     steeringServo.attach(SERVO_PWM);
     steeringServo.write(SERVO_CENTER);
     delay(200);
 
-    // Encoder (only one, on the drive motor or axle)
+    // Encoder (optional)
     ESP32Encoder::useInternalWeakPullResistors = UP;
     encoder.attachHalfQuad(ENC_A_A, ENC_A_B);
     encoder.clearCount();
 
-    Serial.println("Setup complete.");
+    // I2C for IMU
+    Wire.begin(IMU_SDA, IMU_SCL);
+    if (!bno.begin()) {
+        Serial.println("BNO055 not detected – check wiring.");
+    } else {
+        Serial.println("BNO055 initialized.");
+        bno.setExtCrystalUse(true);   // Use external crystal for better accuracy
+    }
+
+    Serial.println("Setup complete. Waiting for commands...");
 }
 
 // ============================================================
@@ -99,14 +120,20 @@ void setup() {
 // ============================================================
 
 void loop() {
-    // Read ultrasonics every 20 ms
+    // Read ultrasonics every 20 ms (50 Hz)
     static unsigned long last_ultra = 0;
     if (millis() - last_ultra > 20) {
         last_ultra = millis();
         readUltrasonic();
     }
 
-    // Send sensor data to Pi every 50 ms
+    // Read IMU every 5 ms (200 Hz)
+    if (millis() - last_imu_read > IMU_READ_INTERVAL) {
+        last_imu_read = millis();
+        readIMU();
+    }
+
+    // Send sensor data every 50 ms (20 Hz) to Pi
     if (millis() - last_sensor_send > SENSOR_SEND_INTERVAL) {
         last_sensor_send = millis();
         sendSensorData();
@@ -164,7 +191,19 @@ void readUltrasonic() {
 }
 
 // ============================================================
-// Send Sensor Data (JSON)
+// IMU Reading (BNO086)
+// ============================================================
+
+void readIMU() {
+    sensors_event_t event;
+    bno.getEvent(&event);
+    // Gyroscope Z (yaw rate) in rad/s
+    // Positive = counter‑clockwise (CCW), negative = clockwise (CW)
+    imu_yaw_rate = event.gyro.z;
+}
+
+// ============================================================
+// Send Sensor Data (JSON) to Raspberry Pi
 // ============================================================
 
 void sendSensorData() {
@@ -172,15 +211,16 @@ void sendSensorData() {
 
     // Build JSON without checksum first
     String msg = "{";
-    msg += "\"type\":\"ultrasonic\",";
+    msg += "\"type\":\"sensor_data\",";
     msg += "\"data\":{";
     msg += "\"front\":" + String(front_dist) + ",";
     msg += "\"front_left\":" + String(front_left_dist) + ",";
     msg += "\"front_right\":" + String(front_right_dist) + ",";
-    msg += "\"enc\":" + String(enc);
+    msg += "\"enc\":" + String(enc) + ",";
+    msg += "\"imu_yaw_rate\":" + String(imu_yaw_rate, 6);
     msg += "}";
 
-    // Compute simple checksum (sum of char codes)
+    // Compute simple checksum (sum of ASCII codes)
     int sum = 0;
     for (int i = 0; i < msg.length(); i++) sum += msg[i];
     msg += ",\"checksum\":" + String(sum);
@@ -190,14 +230,11 @@ void sendSensorData() {
 }
 
 // ============================================================
-// Command Processing (JSON)
+// Command Processing (JSON from Raspberry Pi)
 // ============================================================
 
 void processCommand(String json) {
-    // Expected format: {"type":"cmd","speed":0.30,"steering":0.15}
-    // speed: m/s (negative = reverse)
-    // steering: radians (positive = left turn)
-
+    // Expected: {"type":"cmd","speed":0.30,"steering":0.15}
     float speed = 0.0, steer = 0.0;
     int idxSpeed = json.indexOf("\"speed\":");
     int idxSteer = json.indexOf("\"steering\":");
@@ -208,13 +245,19 @@ void processCommand(String json) {
         sscanf(json.substring(idxSteer + 11).c_str(), "%f", &steer);
     }
 
+    // Clamp speed and steering (hard limits)
+    if (speed > MAX_SPEED_MPS) speed = MAX_SPEED_MPS;
+    if (speed < -MAX_SPEED_MPS) speed = -MAX_SPEED_MPS;
+    if (steer > MAX_STEER_RAD) steer = MAX_STEER_RAD;
+    if (steer < -MAX_STEER_RAD) steer = -MAX_STEER_RAD;
+
     target_speed = speed;
     target_steer = steer;
     new_cmd = true;
 }
 
 // ============================================================
-// Motor Control
+// Motor Speed Control
 // ============================================================
 
 void applyMotorSpeed(float speed_mps) {
@@ -229,7 +272,6 @@ void applyMotorSpeed(float speed_mps) {
 }
 
 int mapSpeedToDuty(float speed, float max_speed) {
-    // Clamp speed to ±max_speed
     if (speed > max_speed) speed = max_speed;
     if (speed < -max_speed) speed = -max_speed;
     return (int)((speed / max_speed) * MAX_DUTY);
@@ -240,10 +282,9 @@ int mapSpeedToDuty(float speed, float max_speed) {
 // ============================================================
 
 void applyServoAngle(float angle_rad) {
-    // Clamp steering angle to mechanical limits
+    // Clamp to mechanical limits
     float clamped = constrain(angle_rad, -MAX_STEER_RAD, MAX_STEER_RAD);
-    // Map radians to servo pulse (0-180)
-    // angle_rad = 0 -> 90°, positive -> left, negative -> right
+    // Map radians to servo pulse (0-180°)
     int angle_deg = SERVO_CENTER + (int)((clamped / MAX_STEER_RAD) * 90.0);
     angle_deg = constrain(angle_deg, 0, 180);
     steeringServo.write(angle_deg);
