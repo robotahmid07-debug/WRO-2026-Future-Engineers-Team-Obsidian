@@ -1,13 +1,15 @@
 """
 Smart Ultrasonic Emergency Shield with Traffic Rule Compliance.
 - Follows traffic light rules (steer LEFT for RED, RIGHT for GREEN).
-- Only reverses when critically close (< 8 cm).
-- Uses LIDAR for parking (360° coverage) instead of ultrasonic.
+- Reverses when critically close (< critical_stop) but only if the rear is clear.
+- Reverse distance = 10 cm (tunable via reverse_speed and reverse_duration).
+- Uses LIDAR (360°) to check rear clearance before reversing.
 """
 
 import time
+import math
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,37 +23,52 @@ class EmergencyShield:
         self.enabled = config.get('enabled', True)
         self.thresholds = config.get('thresholds_cm', {})
 
-        # Core distances
-        self.front_stop = self.thresholds.get('front_stop', 12.0)       # Start reducing speed
+        # Core distances (from YAML)
+        self.front_stop = self.thresholds.get('front_stop', 12.0)
         self.front_left_safety = self.thresholds.get('front_left_safety', 18.0)
         self.front_right_safety = self.thresholds.get('front_right_safety', 18.0)
-        self.critical_stop = self.thresholds.get('critical_stop', 8.0)  # Emergency reverse
+        self.critical_stop = self.thresholds.get('critical_stop', 8.0)
+
+        # Side safety (minimum of left and right)
+        self.side_safety = min(self.front_left_safety, self.front_right_safety)
 
         self.dynamic_throttle = config.get('dynamic_throttle', {})
         self.dampening_enabled = self.dynamic_throttle.get('enable_speed_dampening', True)
         self.dampened_factor = self.dynamic_throttle.get('dampened_speed_factor', 0.60)
 
-        # Steering gains
+        # ---- Steering and Reverse Tuning ----
         self.steer_gain = 0.4
-        self.reverse_speed = -0.1  # m/s when reversing
+
+        # Reverse parameters – tuned for 10 cm backward movement
+        # Distance = speed × duration → 0.1 × 1.0 = 0.1 m (10 cm)
+        self.reverse_speed = -0.10      # m/s (negative = reverse)
+        self.reverse_duration = 1.0     # seconds
+
+        # Minimum rear clearance required before reversing (from LIDAR)
+        self.rear_clearance_threshold = 0.15   # meters (15 cm)
 
         # Smoothing
         self.smoothing_factor = 0.3
         self.last_steer = 0.0
         self.last_throttle = 1.0
 
-        # State
+        # Sensor data
         self.latest_distances = {
             'front': float('inf'),
             'front_left': float('inf'),
             'front_right': float('inf')
         }
         self.last_update = 0.0
-        self.reverse_timer = 0.0
-        self.is_reversing = False
 
-        # Traffic rule state (set by state_machine)
-        self.target_steer_direction = 0.0  # -1 = right, +1 = left, 0 = straight
+        # Traffic rule target (set by state_machine)
+        self.target_steer_direction = 0.0   # -1 = right, +1 = left, 0 = straight
+
+        # Reference to LIDAR (for rear clearance check) – set later by state_machine
+        self.lidar = None
+
+    def set_lidar(self, lidar_object):
+        """Set the LIDAR object for rear clearance checks."""
+        self.lidar = lidar_object
 
     def update(self) -> Dict[str, float]:
         """Poll serial bridge for latest ultrasonic data."""
@@ -65,88 +82,123 @@ class EmergencyShield:
         return self.latest_distances
 
     def set_target_steer_direction(self, direction: float):
-        """
-        Set the intended steering direction based on traffic rules.
-        direction: -1 = right, +1 = left, 0 = straight
-        """
+        """Tell the emergency shield which way we want to go (traffic rule)."""
         self.target_steer_direction = direction
+
+    def _is_rear_clear(self) -> bool:
+        """
+        Check if the rear path is clear using LIDAR (angle around 180°).
+        Returns True if clear, False if blocked.
+        """
+        if self.lidar is None:
+            # No LIDAR provided – assume clear (but log a warning)
+            logger.warning("LIDAR not set for rear clearance check – assuming clear.")
+            return True
+
+        scan = self.lidar.get_scan_snapshot()
+        if not scan:
+            # No scan available – assume clear
+            return True
+
+        rear_dists = []
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            # Rear sector: 180° ± 30°
+            if abs(abs(ang) - 180) < 30:
+                rear_dists.append(dist)
+
+        if not rear_dists:
+            # No rear readings – assume clear
+            return True
+
+        avg_rear = sum(rear_dists) / len(rear_dists)
+        return avg_rear > self.rear_clearance_threshold
 
     def get_emergency_actions(self) -> Dict[str, any]:
         """
-        Returns actions based on current distances and traffic rules.
+        Returns actions based on current distances.
 
         Returns:
             dict with keys:
-                brake (bool): True if hard stop required (only if critically stuck).
+                brake (bool): True only if critically stuck.
                 steer_offset (float): additional angular velocity (rad/s).
-                throttle_factor (float): speed multiplier (0.0 to 1.0).
+                throttle_factor (float): speed multiplier.
                 reverse (bool): True if reversing.
                 reverse_duration (float): seconds to reverse.
+                reverse_speed (float): speed during reverse (m/s).
         """
         if not self.enabled:
             return {'brake': False, 'steer_offset': 0.0, 'throttle_factor': 1.0,
-                    'reverse': False, 'reverse_duration': 0.0}
+                    'reverse': False, 'reverse_duration': 0.0, 'reverse_speed': 0.0}
 
         dist_f = self.latest_distances.get('front', float('inf'))
         dist_fl = self.latest_distances.get('front_left', float('inf'))
         dist_fr = self.latest_distances.get('front_right', float('inf'))
 
-        # --- 1. CRITICAL: Reverse if front is critically close ---
+        # ---- 1. CRITICAL: Reverse if front is critically close ----
         if dist_f < self.critical_stop:
-            logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm! Reversing.")
-            return {
-                'brake': False,
-                'steer_offset': self.target_steer_direction * self.steer_gain * 0.5,
-                'throttle_factor': 0.0,
-                'reverse': True,
-                'reverse_duration': 1.5  # reverse for 1.5 seconds
-            }
+            # Check rear clearance before reversing
+            if self._is_rear_clear():
+                logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm! Reversing (rear clear).")
+                return {
+                    'brake': False,
+                    'steer_offset': self.target_steer_direction * self.steer_gain * 0.5,
+                    'throttle_factor': 0.0,
+                    'reverse': True,
+                    'reverse_duration': self.reverse_duration,
+                    'reverse_speed': self.reverse_speed
+                }
+            else:
+                # Rear is blocked – cannot reverse. Stop and steer hard.
+                logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, but rear blocked! Hard stop + steer.")
+                return {
+                    'brake': True,
+                    'steer_offset': self.target_steer_direction * self.steer_gain,
+                    'throttle_factor': 0.0,
+                    'reverse': False,
+                    'reverse_duration': 0.0,
+                    'reverse_speed': 0.0
+                }
 
-        # --- 2. FRONT OBSTACLE: Follow traffic rules ---
+        # ---- 2. FRONT OBSTACLE (but not critical) ----
         if dist_f < self.front_stop:
-            # Steer in the intended direction (traffic rule), but reduce speed
+            # Steer according to traffic rule, reduce speed
             steer = self.target_steer_direction * self.steer_gain
-            throttle = 0.4  # reduce speed to 40%
+            throttle = 0.4
             logger.debug(f"Front obstacle at {dist_f:.1f} cm. Steering {self.target_steer_direction:.2f}.")
             return {
                 'brake': False,
                 'steer_offset': steer,
                 'throttle_factor': throttle,
                 'reverse': False,
-                'reverse_duration': 0.0
+                'reverse_duration': 0.0,
+                'reverse_speed': 0.0
             }
 
-        # --- 3. SIDE OBSTACLE: Steer away ---
+        # ---- 3. SIDE OBSTACLE: Steer away ----
         left_blocked = dist_fl < self.front_left_safety
         right_blocked = dist_fr < self.front_right_safety
 
         raw_steer = 0.0
         if left_blocked and not right_blocked:
-            # Left blocked -> steer right (negative)
-            raw_steer = -self.steer_gain
+            raw_steer = -self.steer_gain   # steer right
         elif right_blocked and not left_blocked:
-            # Right blocked -> steer left (positive)
-            raw_steer = self.steer_gain
+            raw_steer = self.steer_gain    # steer left
         elif left_blocked and right_blocked:
-            # Both blocked -> go straight but slow
-            raw_steer = 0.0
+            raw_steer = 0.0                # both blocked – go straight
 
-        # --- 4. Combine with traffic rule target ---
-        # If a traffic rule is active, bias steering toward it
+        # ---- 4. Blend with traffic rule target ----
         if abs(self.target_steer_direction) > 0.1:
-            # Blend: 70% traffic rule, 30% obstacle avoidance
             combined_steer = (0.7 * self.target_steer_direction * self.steer_gain +
                               0.3 * raw_steer)
         else:
             combined_steer = raw_steer
 
-        # --- 5. PROXIMITY-BASED THROTTLE ---
-        # FIXED: define side_safety as the minimum of the two side thresholds
-        side_safety = min(self.front_left_safety, self.front_right_safety)
-
-        if dist_f < side_safety * 1.5:
+        # ---- 5. Proximity-based throttle ----
+        if dist_f < self.side_safety * 1.5:
             prox_factor = max(0.4, (dist_f - self.front_stop) /
-                              ((side_safety * 1.5) - self.front_stop))
+                              ((self.side_safety * 1.5) - self.front_stop))
             prox_factor = min(1.0, prox_factor)
         else:
             prox_factor = 1.0
@@ -156,7 +208,7 @@ class EmergencyShield:
         else:
             throttle = 1.0 * prox_factor
 
-        # --- 6. SMOOTHING ---
+        # ---- 6. Smoothing ----
         smoothed_steer = (self.smoothing_factor * combined_steer +
                           (1 - self.smoothing_factor) * self.last_steer)
         smoothed_throttle = (self.smoothing_factor * throttle +
@@ -170,5 +222,6 @@ class EmergencyShield:
             'steer_offset': smoothed_steer,
             'throttle_factor': smoothed_throttle,
             'reverse': False,
-            'reverse_duration': 0.0
+            'reverse_duration': 0.0,
+            'reverse_speed': 0.0
         }
