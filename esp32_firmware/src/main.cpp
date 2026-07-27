@@ -25,7 +25,7 @@
 #define PWM_FREQ 20000
 #define PWM_RES 10            // 0-1023
 #define MAX_DUTY 1023
-#define MAX_SPEED_MPS 0.5     // m/s, for mapping speed to duty
+#define MAX_SPEED_MPS 1.5     // m/s, for mapping speed to duty
 #define ULTRASONIC_TIMEOUT 30000  // µs
 
 // Steering servo limits (mechanical)
