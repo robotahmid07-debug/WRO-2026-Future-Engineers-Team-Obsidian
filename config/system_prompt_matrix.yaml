@@ -181,14 +181,14 @@ system_prompt_matrix:
   # ==========================================
   vehicle:
     wheelbase_m: 0.25                 # Distance between front and rear axles (meters)
-    max_speed_mps: 0.5                # Maximum forward speed (m/s)
+    max_speed_mps: 1.5                # Maximum forward speed (m/s)
     max_steer_rad: 0.524              # Maximum steering angle (radians) ~30°
 
   # ==========================================
   # 12. NAVIGATION & BEHAVIOR
   # ==========================================
   navigation:
-    base_speed_mps: 0.3               # Cruise speed during navigation
+    base_speed_mps: 1.0               # Cruise speed during navigation
     steer_magnitude_radps: 0.3        # Yaw rate when turning for traffic lights
     wall_follow_gain: 0.25            # Proportional gain for wall‑following
 
