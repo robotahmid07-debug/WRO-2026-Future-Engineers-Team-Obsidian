@@ -141,9 +141,12 @@ class EmergencyShield:
             combined_steer = raw_steer
 
         # --- 5. PROXIMITY-BASED THROTTLE ---
-        if dist_f < self.side_safety * 1.5:
+        # FIXED: define side_safety as the minimum of the two side thresholds
+        side_safety = min(self.front_left_safety, self.front_right_safety)
+
+        if dist_f < side_safety * 1.5:
             prox_factor = max(0.4, (dist_f - self.front_stop) /
-                              ((self.side_safety * 1.5) - self.front_stop))
+                              ((side_safety * 1.5) - self.front_stop))
             prox_factor = min(1.0, prox_factor)
         else:
             prox_factor = 1.0
