@@ -7,6 +7,7 @@ Integrates:
   - Surprise rule (Lap X -> Lap X+1 direction change based on traffic light color).
   - Emergency lap fallback (force lap completion if LIDAR fails).
   - Map usage control (enable/disable mapping).
+  - IMU fusion for heading stabilisation and corner confirmation (data from ESP32).
   - All calibratable parameters now read from config.
 """
 
@@ -230,8 +231,18 @@ class StateMachine:
 
         # If change > 40%, it's likely a corner
         if left_change > 0.4 or right_change > 0.4:
-            logger.debug(f"Corner detected: left_change={left_change:.2f}, right_change={right_change:.2f}")
-            return True
+            # ---- IMU confirmation (optional) ----
+            # If IMU data is available, confirm that the robot is actually rotating.
+            if hasattr(self.localization, 'latest_imu_yaw_rate') and self.localization.latest_imu_yaw_rate is not None:
+                yaw_rate = self.localization.latest_imu_yaw_rate
+                if abs(yaw_rate) > 0.3:   # rad/s threshold (tune)
+                    return True
+                else:
+                    # LIDAR says corner, but IMU says no rotation → false positive
+                    return False
+            else:
+                # No IMU – rely solely on LIDAR
+                return True
 
         return False
 
@@ -244,7 +255,7 @@ class StateMachine:
         if self.lap_start_pose is not None:
             self.distance_since_lap_start = abs(pose.x - self.lap_start_pose.x)
 
-        # 1. Try LIDAR corner detection
+        # 1. Try LIDAR corner detection (now with IMU confirmation)
         if self._detected_corner_via_lidar():
             self.sections_passed += 1
             self.last_section_time = time.time()
@@ -315,8 +326,24 @@ class StateMachine:
 
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
-        # 1. Update mapping enable/disable (in case it changed)
-        self.localization.use_map_correction = self.use_mapping
+        # ---- 0. Receive IMU data from ESP32 (if available) ----
+        # Poll the serial bridge for incoming sensor messages
+        sensor_msg = self.serial_bridge.receive(block=False)
+        if sensor_msg and sensor_msg.get('type') == 'sensor_data':
+            data = sensor_msg.get('data', {})
+            if 'imu_yaw_rate' in data:
+                # Pass the IMU yaw rate to localization
+                self.localization.update_imu_data(data['imu_yaw_rate'])
+
+        # 1. Update emergency shield
+        self.emergency.update()
+        emergency_actions = self.emergency.get_emergency_actions()
+
+        if emergency_actions.get('brake', False):
+            self.steering.stop()
+            self.state = RobotState.EMERGENCY_STOP
+            logger.warning("Emergency stop triggered")
+            return
 
         # 2. Get color detections from HuskyLens
         color_blocks = self.vision.get_latest_colors()
@@ -372,16 +399,7 @@ class StateMachine:
         else:
             raw_angular = wall_steer
 
-        # 5. Emergency shield
-        self.emergency.update()
-        emergency_actions = self.emergency.get_emergency_actions()
-
-        if emergency_actions.get('brake', False):
-            self.steering.stop()
-            self.state = RobotState.EMERGENCY_STOP
-            logger.warning("Emergency stop triggered")
-            return
-
+        # 5. Emergency shield corrections
         angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
         throttle = emergency_actions.get('throttle_factor', 1.0)
         linear = self.BASE_SPEED * throttle
