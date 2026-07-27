@@ -8,6 +8,7 @@ Integrates:
   - Emergency lap fallback (force lap completion if LIDAR fails).
   - Map usage control (enable/disable mapping).
   - IMU fusion for heading stabilisation and corner confirmation (data from ESP32).
+  - Reverse handling from emergency shield (with timer).
   - All calibratable parameters now read from config.
 """
 
@@ -105,6 +106,14 @@ class StateMachine:
 
         # Map usage flag
         self.use_mapping = self.config.mapping.use_mapping
+
+        # Reverse timer
+        self.reverse_end_time = 0.0
+        self.reverse_speed = 0.0
+        self.reverse_steer = 0.0
+
+        # Give emergency shield access to LIDAR for rear clearance
+        self.emergency.set_lidar(self.lidar)
 
         logger.info(f"StateMachine initialized with challenge: {self.challenge}")
 
@@ -327,97 +336,105 @@ class StateMachine:
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
         # ---- 0. Receive IMU data from ESP32 (if available) ----
-        # Poll the serial bridge for incoming sensor messages
         sensor_msg = self.serial_bridge.receive(block=False)
         if sensor_msg and sensor_msg.get('type') == 'sensor_data':
             data = sensor_msg.get('data', {})
             if 'imu_yaw_rate' in data:
-                # Pass the IMU yaw rate to localization
                 self.localization.update_imu_data(data['imu_yaw_rate'])
 
         # 1. Update emergency shield
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
 
-        if emergency_actions.get('brake', False):
+        # ---- Check for reverse command ----
+        if emergency_actions.get('reverse', False):
+            # Set the reverse timer and store the reverse parameters
+            self.reverse_end_time = time.time() + emergency_actions.get('reverse_duration', 1.0)
+            self.reverse_speed = emergency_actions.get('reverse_speed', -0.10)
+            self.reverse_steer = emergency_actions.get('steer_offset', 0.0)
+            logger.info(f"Reverse commanded: speed={self.reverse_speed}, duration={emergency_actions.get('reverse_duration', 1.0)}s")
+        elif emergency_actions.get('brake', False):
             self.steering.stop()
             self.state = RobotState.EMERGENCY_STOP
             logger.warning("Emergency stop triggered")
             return
 
-        # 2. Get color detections from HuskyLens
-        color_blocks = self.vision.get_latest_colors()
-        detections = []
-        for color_block in color_blocks:
-            angle_deg = ((color_block.x - 160) / 160.0) * 30.0  # -30 to +30 deg
-            range_m = self.lidar.get_range_in_sector(angle_deg, 5.0)
-            if range_m is not None and range_m > 0.1:
-                angle_rad = math.radians(angle_deg)
-                x_local = range_m * math.cos(angle_rad)
-                y_local = range_m * math.sin(angle_rad)
-                if x_local > 0:
-                    detections.append((color_block.color_id, x_local, y_local))
-
-        if detections:
-            self.spatial_map.update(detections)
-
-        confirmed_objects = self.spatial_map.get_confirmed_objects()
-        traffic_angular = 0.0
-        if confirmed_objects:
-            target = confirmed_objects[0]  # closest
-            # Store last color for surprise rule
-            self.last_traffic_light_color = target.color_id
-            traffic_angular = self._get_angular_velocity_from_color(target.color_id)
-
-        # 3. Wall‑following using LIDAR (adaptive to direction)
-        scan = self.lidar.get_scan_snapshot()
-        left_dist = None
-        right_dist = None
-        for ang, dist in scan.items():
-            if dist < 0.05 or dist > 5.0:
-                continue
-            if abs(ang - 90) < 10:
-                left_dist = dist if left_dist is None or dist < left_dist else left_dist
-            elif abs(ang + 90) < 10:
-                right_dist = dist if right_dist is None or dist < right_dist else right_dist
-
-        wall_steer = 0.0
-        if left_dist is not None and right_dist is not None:
-            error = left_dist - right_dist   # positive = too close to left wall
-            if self.current_direction == "CLOCKWISE":
-                # CW: follow left wall – steer right if error positive
-                wall_steer = -self.WALL_FOLLOW_GAIN * error
-            else:  # COUNTER_CLOCKWISE
-                # CCW: follow right wall – steer left if error positive
-                wall_steer = self.WALL_FOLLOW_GAIN * error
-            # Clamp to reasonable range
-            wall_steer = max(-0.5, min(0.5, wall_steer))
-
-        # 4. Combine: traffic light has priority
-        if abs(traffic_angular) > 0.01:
-            raw_angular = traffic_angular
+        # ---- 2. If we are currently reversing, override steering ----
+        current_time = time.time()
+        if current_time < self.reverse_end_time:
+            # Still reversing
+            linear = self.reverse_speed
+            angular = self.reverse_steer
+            # Add a small smoothing to angular? Not needed for reverse.
         else:
-            raw_angular = wall_steer
+            # Normal navigation – compute steering as usual
+            # 2a. Get color detections from HuskyLens
+            color_blocks = self.vision.get_latest_colors()
+            detections = []
+            for color_block in color_blocks:
+                angle_deg = ((color_block.x - 160) / 160.0) * 30.0
+                range_m = self.lidar.get_range_in_sector(angle_deg, 5.0)
+                if range_m is not None and range_m > 0.1:
+                    angle_rad = math.radians(angle_deg)
+                    x_local = range_m * math.cos(angle_rad)
+                    y_local = range_m * math.sin(angle_rad)
+                    if x_local > 0:
+                        detections.append((color_block.color_id, x_local, y_local))
 
-        # 5. Emergency shield corrections
-        angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
-        throttle = emergency_actions.get('throttle_factor', 1.0)
-        linear = self.BASE_SPEED * throttle
+            if detections:
+                self.spatial_map.update(detections)
 
-        # 6. Apply steering (Ackermann – one motor + servo)
+            confirmed_objects = self.spatial_map.get_confirmed_objects()
+            traffic_angular = 0.0
+            if confirmed_objects:
+                target = confirmed_objects[0]
+                self.last_traffic_light_color = target.color_id
+                traffic_angular = self._get_angular_velocity_from_color(target.color_id)
+
+            # 2b. Wall‑following using LIDAR (adaptive to direction)
+            scan = self.lidar.get_scan_snapshot()
+            left_dist = None
+            right_dist = None
+            for ang, dist in scan.items():
+                if dist < 0.05 or dist > 5.0:
+                    continue
+                if abs(ang - 90) < 10:
+                    left_dist = dist if left_dist is None or dist < left_dist else left_dist
+                elif abs(ang + 90) < 10:
+                    right_dist = dist if right_dist is None or dist < right_dist else right_dist
+
+            wall_steer = 0.0
+            if left_dist is not None and right_dist is not None:
+                error = left_dist - right_dist
+                if self.current_direction == "CLOCKWISE":
+                    wall_steer = -self.WALL_FOLLOW_GAIN * error
+                else:
+                    wall_steer = self.WALL_FOLLOW_GAIN * error
+                wall_steer = max(-0.5, min(0.5, wall_steer))
+
+            # 2c. Combine traffic light and wall‑following
+            if abs(traffic_angular) > 0.01:
+                raw_angular = traffic_angular
+            else:
+                raw_angular = wall_steer
+
+            # 2d. Apply emergency shield corrections (non‑reverse)
+            angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
+            throttle = emergency_actions.get('throttle_factor', 1.0)
+            linear = self.BASE_SPEED * throttle
+
+        # ---- 3. Apply steering ----
         self.steering.set_speed(linear, angular)
 
-        # 7. Update localization with LIDAR points for mapping
+        # ---- 4. Update localization with LIDAR points for mapping ----
         scan_data = self.lidar.get_scan_snapshot()
         lidar_scan = [(ang, dist) for ang, dist in scan_data.items()]
-        # Use a subset to reduce processing (every 5 degrees)
         lidar_subset = [(ang, dist) for ang, dist in lidar_scan if abs(ang) % 5 < 1]
 
-        # Convert angular to steering angle for odometry (approximation using wheelbase from config)
         steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.config.vehicle.wheelbase_m, linear)
         self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
 
-        # 8. Update lap counting
+        # ---- 5. Update lap counting ----
         self._update_lap_count()
 
     def _termination_state(self):
@@ -460,4 +477,5 @@ class StateMachine:
         self._prev_avg_right = None
         self.last_traffic_light_color = None
         self.surprise_rule_activated = False
+        self.reverse_end_time = 0.0
         logger.info("State machine reset to INIT")
