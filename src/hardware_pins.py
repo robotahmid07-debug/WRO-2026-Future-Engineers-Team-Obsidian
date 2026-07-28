@@ -55,15 +55,6 @@ class ESP32Pins:
     SERVO_PWM = 41    # PWM signal for steering servo
 
     # ============================================================
-    # QUADRATURE ENCODERS – NOT USED (removed)
-    # These pins are available for future expansion if needed.
-    # ============================================================
-    # ENC_A_A = 11
-    # ENC_A_B = 12
-    # ENC_B_A = 13
-    # ENC_B_B = 14
-
-    # ============================================================
     # NOTE: Avoid strapping pins: GPIO0, 3, 45, 46
     #       Avoid SPI flash pins: GPIO26–32
     # ============================================================
