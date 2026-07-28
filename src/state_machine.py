@@ -9,6 +9,7 @@ Integrates:
   - Map usage control (enable/disable mapping).
   - IMU fusion for heading stabilisation and corner confirmation (data from ESP32).
   - Reverse handling from emergency shield (with timer).
+  - Traffic light filtering: area, aspect ratio, Y‑position (ROI) to reject false positives.
   - All calibratable parameters now read from config.
 """
 
@@ -39,6 +40,14 @@ class RobotState(Enum):
 
 
 class StateMachine:
+    # Traffic light detection filters (tunable)
+    MIN_AREA = 200          # Minimum area in pixels (ignore tiny blobs)
+    MAX_AREA = 15000        # Maximum area (ignore huge objects)
+    MIN_ASPECT = 1.5        # Minimum height/width ratio (pillars are tall)
+    MAX_ASPECT = 4.0        # Maximum height/width ratio
+    ROI_Y_MIN = 30          # Ignore objects above this Y (top of frame)
+    ROI_Y_MAX = 210         # Ignore objects below this Y (bottom of frame)
+
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
                  spatial_map: SpatialMap, emergency_shield: EmergencyShield,
@@ -368,10 +377,34 @@ class StateMachine:
             # Add a small smoothing to angular? Not needed for reverse.
         else:
             # Normal navigation – compute steering as usual
-            # 2a. Get color detections from HuskyLens
+            # 2a. Get color detections from HuskyLens and apply filters
             color_blocks = self.vision.get_latest_colors()
             detections = []
             for color_block in color_blocks:
+                # ============================================================
+                # TRAFFIC LIGHT FILTERS – reject false positives
+                # ============================================================
+                # Filter 1: Area (ignore too small / too large)
+                if color_block.area < self.MIN_AREA or color_block.area > self.MAX_AREA:
+                    logger.debug(f"Block area {color_block.area} rejected (min={self.MIN_AREA}, max={self.MAX_AREA})")
+                    continue
+
+                # Filter 2: Aspect Ratio (pillars are tall and narrow)
+                if color_block.width == 0:
+                    continue
+                aspect = color_block.height / color_block.width
+                if aspect < self.MIN_ASPECT or aspect > self.MAX_ASPECT:
+                    logger.debug(f"Block aspect {aspect:.2f} rejected (min={self.MIN_ASPECT}, max={self.MAX_ASPECT})")
+                    continue
+
+                # Filter 3: Y-position (ROI) – ignore top/bottom edges
+                if color_block.y < self.ROI_Y_MIN or color_block.y > self.ROI_Y_MAX:
+                    logger.debug(f"Block y={color_block.y} rejected (ROI min={self.ROI_Y_MIN}, max={self.ROI_Y_MAX})")
+                    continue
+
+                # ============================================================
+                # FUSE WITH LIDAR (existing logic)
+                # ============================================================
                 angle_deg = ((color_block.x - 160) / 160.0) * 30.0
                 range_m = self.lidar.get_range_in_sector(angle_deg, 5.0)
                 if range_m is not None and range_m > 0.1:
