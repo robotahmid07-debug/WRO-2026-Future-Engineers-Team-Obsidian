@@ -1,0 +1,10 @@
+🧪 Tuning the Filters
+You can adjust the constants at the top of the class if needed:
+
+Parameter	Default	When to Change
+MIN_AREA	200	Increase if too many small false positives.
+MAX_AREA	15000	Decrease if large walls are mistakenly detected.
+MIN_ASPECT	1.5	Pillars have aspect=2.0 – this range is safe.
+MAX_ASPECT	4.0	
+ROI_Y_MIN	30	Adjust if the camera is mounted higher/lower.
+ROI_Y_MAX	210
