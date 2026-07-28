@@ -1,1 +1,33 @@
+📄 Default Username in the Service File
+The default username set in your wro_robot.service file is:
+
+text
+User=pi
+📂 Exact Line from Your Service File
+ini
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/wro_future_engineers_2026
+ExecStart=/home/pi/wro_future_engineers_2026/venv/bin/python3 /home/pi/wro_future_engineers_2026/main.py
+⚠️ Important – What This Means for You
+Scenario	What You Must Do
+You create a user named pi	✅ Everything works as-is – no changes needed.
+You create a user with a different name (e.g., teamobsidian)	❌ The service will fail because the user pi doesn't exist. You must edit wro_robot.service and change User=pi to User=teamobsidian. Also update the paths from /home/pi/... to /home/teamobsidian/....
+🔧 How to Fix If You Choose a Different Username
+Edit the service file before running the installer:
+
+bash
+nano scripts/wro_robot.service
+Change:
+
+ini
+User=teamobsidian
+WorkingDirectory=/home/teamobsidian/wro_future_engineers_2026
+ExecStart=/home/teamobsidian/wro_future_engineers_2026/venv/bin/python3 /home/teamobsidian/wro_future_engineers_2026/main.py
+Then run the installer as usual.
+
+✅ Recommendation
+To avoid extra steps, use pi as your username when installing Raspberry Pi OS. That way, everything works without any modifications. 🚀
+
 
