@@ -13,6 +13,7 @@ Integrates:
   - Speed reduction based on steering intensity (smooth cornering & traffic lights).
   - IMU G‑force limiting (gyro‑based lateral G, low‑pass filtered) for optimal speed.
   - Velocity‑compensated object pruning (ego‑motion).
+  - Full support for emergency shield hard steer (front + rear blocked → crawl + hard steer).
   - All calibratable parameters read from config.
 """
 
@@ -346,11 +347,13 @@ class StateMachine:
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
 
+        # ---- 1a. Handle reverse command ----
         if emergency_actions.get('reverse', False):
             self.reverse_end_time = time.time() + emergency_actions.get('reverse_duration', 1.0)
             self.reverse_speed = emergency_actions.get('reverse_speed', -0.10)
             self.reverse_steer = emergency_actions.get('steer_offset', 0.0)
             logger.info(f"Reverse commanded: speed={self.reverse_speed}")
+        # ---- 1b. Handle brake (only if emergency shield says true) ----
         elif emergency_actions.get('brake', False):
             self.steering.stop()
             self.state = RobotState.EMERGENCY_STOP
@@ -362,6 +365,7 @@ class StateMachine:
         if current_time < self.reverse_end_time:
             linear = self.reverse_speed
             angular = self.reverse_steer
+            logger.debug(f"Reversing: speed={linear}, steer={angular}")
         else:
             # ---- Normal navigation ----
 
@@ -403,6 +407,10 @@ class StateMachine:
                 target = confirmed_objects[0]
                 self.last_traffic_light_color = target.color_id
                 traffic_angular = self._get_angular_velocity_from_color(target.color_id)
+                # Tell emergency shield which direction we want to go (for hard steer)
+                self.emergency.set_target_steer_direction(math.copysign(1.0, traffic_angular) if traffic_angular != 0 else 0.0)
+            else:
+                self.emergency.set_target_steer_direction(0.0)
 
             # ---- 2c. Wall‑following (adaptive to direction) ----
             scan = self.lidar.get_scan_snapshot()
@@ -425,13 +433,14 @@ class StateMachine:
                     wall_steer = self.WALL_FOLLOW_GAIN * error
                 wall_steer = max(-0.5, min(0.5, wall_steer))
 
-            # ---- 2d. Combine ----
+            # ---- 2d. Combine traffic light and wall‑following ----
             if abs(traffic_angular) > 0.01:
                 raw_angular = traffic_angular
             else:
                 raw_angular = wall_steer
 
-            # ---- 2e. Apply emergency shield corrections ----
+            # ---- 2e. Apply emergency shield corrections (steer_offset & throttle) ----
+            # The emergency shield may provide a hard steer (e.g., when front+rear blocked)
             angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
             throttle = emergency_actions.get('throttle_factor', 1.0)
 
