@@ -8,3 +8,4 @@ MIN_ASPECT	1.5	Pillars have aspect=2.0 – this range is safe.
 MAX_ASPECT	4.0	
 ROI_Y_MIN	30	Adjust if the camera is mounted higher/lower.
 ROI_Y_MAX	210
+also must make sure to fix sutter speed to the higest and the camer white colur balance
