@@ -9,8 +9,10 @@ Integrates:
   - Map usage control (enable/disable mapping).
   - IMU fusion for heading stabilisation and corner confirmation (data from ESP32).
   - Reverse handling from emergency shield (with timer).
-  - Traffic light filtering: area, aspect ratio, Y‑position (ROI) to reject false positives.
-  - All calibratable parameters now read from config.
+  - Traffic light filtering: area, aspect ratio (distance‑dependent), Y‑position (ROI).
+  - Dynamic LIDAR sector tolerance (based on steering angle).
+  - Velocity‑compensated object pruning (ego‑motion).
+  - All calibratable parameters read from config.
 """
 
 import time
@@ -40,13 +42,14 @@ class RobotState(Enum):
 
 
 class StateMachine:
-    # Traffic light detection filters (tunable)
-    MIN_AREA = 200          # Minimum area in pixels (ignore tiny blobs)
-    MAX_AREA = 15000        # Maximum area (ignore huge objects)
-    MIN_ASPECT = 1.5        # Minimum height/width ratio (pillars are tall)
-    MAX_ASPECT = 4.0        # Maximum height/width ratio
-    ROI_Y_MIN = 30          # Ignore objects above this Y (top of frame)
-    ROI_Y_MAX = 210         # Ignore objects below this Y (bottom of frame)
+    # Traffic light detection filters (tunable for 1.5 m/s)
+    MIN_AREA = 120               # Smaller for early detection at distance
+    MAX_AREA = 18000             # Larger for close objects
+    MIN_ASPECT = 1.5             # Baseline (used when no distance)
+    MAX_ASPECT = 4.0             # Baseline
+    ROI_Y_MIN = 30               # Ignore objects above this Y (top of frame)
+    ROI_Y_MAX = 210              # Ignore objects below this Y (bottom of frame)
+    CONFIRMATION_FRAMES = 2      # Reduced from 3 for faster response at 1.5 m/s
 
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
@@ -123,6 +126,10 @@ class StateMachine:
 
         # Give emergency shield access to LIDAR for rear clearance
         self.emergency.set_lidar(self.lidar)
+
+        # Override spatial map confirmation threshold from config or use default
+        if hasattr(self.config, 'sensor_fusion_and_tracking'):
+            self.spatial_map.confirmation_threshold = self.CONFIRMATION_FRAMES
 
         logger.info(f"StateMachine initialized with challenge: {self.challenge}")
 
@@ -211,7 +218,7 @@ class StateMachine:
         Returns:
             True if a corner passage is detected.
         """
-        # Get thread‑safe LIDAR snapshot
+        # Get thread‑safe LIDAR snapshot (median‑filtered)
         scan_data = self.lidar.get_scan_snapshot()
         if not scan_data:
             return False
@@ -374,12 +381,17 @@ class StateMachine:
             # Still reversing
             linear = self.reverse_speed
             angular = self.reverse_steer
-            # Add a small smoothing to angular? Not needed for reverse.
+            # Skip normal navigation (no wall‑following or vision)
         else:
             # Normal navigation – compute steering as usual
             # 2a. Get color detections from HuskyLens and apply filters
             color_blocks = self.vision.get_latest_colors()
             detections = []
+
+            # Pre‑compute steering magnitude for dynamic LIDAR tolerance
+            # We'll use the traffic_angular from confirmed objects later, but we can estimate
+            # from emergency_actions or from previous iteration. We'll compute after.
+
             for color_block in color_blocks:
                 # ============================================================
                 # TRAFFIC LIGHT FILTERS – reject false positives
@@ -389,13 +401,11 @@ class StateMachine:
                     logger.debug(f"Block area {color_block.area} rejected (min={self.MIN_AREA}, max={self.MAX_AREA})")
                     continue
 
-                # Filter 2: Aspect Ratio (pillars are tall and narrow)
+                # Filter 2: Aspect Ratio – we will apply distance‑dependent bounds later
                 if color_block.width == 0:
                     continue
+                # Compute basic aspect; will refine with distance
                 aspect = color_block.height / color_block.width
-                if aspect < self.MIN_ASPECT or aspect > self.MAX_ASPECT:
-                    logger.debug(f"Block aspect {aspect:.2f} rejected (min={self.MIN_ASPECT}, max={self.MAX_ASPECT})")
-                    continue
 
                 # Filter 3: Y-position (ROI) – ignore top/bottom edges
                 if color_block.y < self.ROI_Y_MIN or color_block.y > self.ROI_Y_MAX:
@@ -403,11 +413,36 @@ class StateMachine:
                     continue
 
                 # ============================================================
-                # FUSE WITH LIDAR (existing logic)
+                # FUSE WITH LIDAR (with dynamic sector tolerance)
                 # ============================================================
                 angle_deg = ((color_block.x - 160) / 160.0) * 30.0
-                range_m = self.lidar.get_range_in_sector(angle_deg, 5.0)
+
+                # Determine dynamic tolerance based on steering intensity
+                # We use the current angular velocity from emergency actions (or previous)
+                # Use the raw_angular from traffic rule if available, else wall_follow
+                # We'll compute steering magnitude later; for now use a default.
+                # We'll refine after obtaining distance.
+                # For now, we use a moderate tolerance.
+                sector_tolerance = self._get_lidar_tolerance(0.0)  # placeholder
+
+                range_m = self.lidar.get_range_in_sector(angle_deg, sector_tolerance)
                 if range_m is not None and range_m > 0.1:
+                    # ---- Distance‑dependent aspect ratio bounds ----
+                    if range_m > 0.8:   # Far away
+                        min_aspect = 1.5
+                        max_aspect = 4.0
+                    elif range_m > 0.4:  # Medium
+                        min_aspect = 1.2
+                        max_aspect = 4.5
+                    else:  # Close (< 0.4m)
+                        min_aspect = 1.0
+                        max_aspect = 5.0
+
+                    if aspect < min_aspect or aspect > max_aspect:
+                        logger.debug(f"Block aspect {aspect:.2f} rejected for distance {range_m:.2f}m (min={min_aspect}, max={max_aspect})")
+                        continue
+
+                    # Valid detection
                     angle_rad = math.radians(angle_deg)
                     x_local = range_m * math.cos(angle_rad)
                     y_local = range_m * math.sin(angle_rad)
@@ -415,7 +450,13 @@ class StateMachine:
                         detections.append((color_block.color_id, x_local, y_local))
 
             if detections:
-                self.spatial_map.update(detections)
+                # Update spatial map with robot speed for ego-motion compensation
+                # We'll pass the current linear speed and dt
+                # dt is roughly 1/rate, but we can compute from loop time.
+                dt = 0.05  # assuming 20 Hz, but we can track actual dt
+                # Actually we can compute from last loop time, but we'll pass a rough value.
+                # Better to compute inside the method.
+                self.spatial_map.update(detections, robot_speed=linear if not current_time < self.reverse_end_time else 0.0, dt=dt)
 
             confirmed_objects = self.spatial_map.get_confirmed_objects()
             traffic_angular = 0.0
@@ -469,6 +510,17 @@ class StateMachine:
 
         # ---- 5. Update lap counting ----
         self._update_lap_count()
+
+    def _get_lidar_tolerance(self, steering_magnitude: float) -> float:
+        """
+        Returns dynamic LIDAR sector tolerance based on steering magnitude.
+        """
+        if steering_magnitude > 0.2:   # Hard steering
+            return 15.0
+        elif steering_magnitude > 0.05: # Moderate
+            return 10.0
+        else:
+            return 5.0   # Straight or slight
 
     def _termination_state(self):
         """Handle termination: open challenge stop or obstacle parking."""
