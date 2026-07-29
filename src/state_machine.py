@@ -50,6 +50,7 @@ class StateMachine:
     ROI_Y_MIN = 30               # Ignore objects above this Y (top of frame)
     ROI_Y_MAX = 210              # Ignore objects below this Y (bottom of frame)
     CONFIRMATION_FRAMES = 2      # Reduced from 3 for faster response at 1.5 m/s
+    LIDAR_SECTOR_TOLERANCE = 10.0  # Fixed tolerance (degrees) for LIDAR sector matching
 
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
@@ -384,13 +385,10 @@ class StateMachine:
             # Skip normal navigation (no wall‑following or vision)
         else:
             # Normal navigation – compute steering as usual
-            # 2a. Get color detections from HuskyLens and apply filters
+
+            # ---- 2a. Get color detections from HuskyLens and apply filters ----
             color_blocks = self.vision.get_latest_colors()
             detections = []
-
-            # Pre‑compute steering magnitude for dynamic LIDAR tolerance
-            # We'll use the traffic_angular from confirmed objects later, but we can estimate
-            # from emergency_actions or from previous iteration. We'll compute after.
 
             for color_block in color_blocks:
                 # ============================================================
@@ -404,7 +402,6 @@ class StateMachine:
                 # Filter 2: Aspect Ratio – we will apply distance‑dependent bounds later
                 if color_block.width == 0:
                     continue
-                # Compute basic aspect; will refine with distance
                 aspect = color_block.height / color_block.width
 
                 # Filter 3: Y-position (ROI) – ignore top/bottom edges
@@ -412,22 +409,11 @@ class StateMachine:
                     logger.debug(f"Block y={color_block.y} rejected (ROI min={self.ROI_Y_MIN}, max={self.ROI_Y_MAX})")
                     continue
 
-                # ============================================================
-                # FUSE WITH LIDAR (with dynamic sector tolerance)
-                # ============================================================
+                # ---- Fuse with LIDAR (fixed sector tolerance) ----
                 angle_deg = ((color_block.x - 160) / 160.0) * 30.0
-
-                # Determine dynamic tolerance based on steering intensity
-                # We use the current angular velocity from emergency actions (or previous)
-                # Use the raw_angular from traffic rule if available, else wall_follow
-                # We'll compute steering magnitude later; for now use a default.
-                # We'll refine after obtaining distance.
-                # For now, we use a moderate tolerance.
-                sector_tolerance = self._get_lidar_tolerance(0.0)  # placeholder
-
-                range_m = self.lidar.get_range_in_sector(angle_deg, sector_tolerance)
+                range_m = self.lidar.get_range_in_sector(angle_deg, self.LIDAR_SECTOR_TOLERANCE)
                 if range_m is not None and range_m > 0.1:
-                    # ---- Distance‑dependent aspect ratio bounds ----
+                    # Distance‑dependent aspect ratio bounds
                     if range_m > 0.8:   # Far away
                         min_aspect = 1.5
                         max_aspect = 4.0
@@ -449,15 +435,7 @@ class StateMachine:
                     if x_local > 0:
                         detections.append((color_block.color_id, x_local, y_local))
 
-            if detections:
-                # Update spatial map with robot speed for ego-motion compensation
-                # We'll pass the current linear speed and dt
-                # dt is roughly 1/rate, but we can compute from loop time.
-                dt = 0.05  # assuming 20 Hz, but we can track actual dt
-                # Actually we can compute from last loop time, but we'll pass a rough value.
-                # Better to compute inside the method.
-                self.spatial_map.update(detections, robot_speed=linear if not current_time < self.reverse_end_time else 0.0, dt=dt)
-
+            # ---- 2b. Get confirmed objects from current spatial map (before update) ----
             confirmed_objects = self.spatial_map.get_confirmed_objects()
             traffic_angular = 0.0
             if confirmed_objects:
@@ -465,7 +443,7 @@ class StateMachine:
                 self.last_traffic_light_color = target.color_id
                 traffic_angular = self._get_angular_velocity_from_color(target.color_id)
 
-            # 2b. Wall‑following using LIDAR (adaptive to direction)
+            # ---- 2c. Wall‑following using LIDAR (adaptive to direction) ----
             scan = self.lidar.get_scan_snapshot()
             left_dist = None
             right_dist = None
@@ -486,16 +464,21 @@ class StateMachine:
                     wall_steer = self.WALL_FOLLOW_GAIN * error
                 wall_steer = max(-0.5, min(0.5, wall_steer))
 
-            # 2c. Combine traffic light and wall‑following
+            # ---- 2d. Combine traffic light and wall‑following ----
             if abs(traffic_angular) > 0.01:
                 raw_angular = traffic_angular
             else:
                 raw_angular = wall_steer
 
-            # 2d. Apply emergency shield corrections (non‑reverse)
+            # ---- 2e. Apply emergency shield corrections ----
             angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
             throttle = emergency_actions.get('throttle_factor', 1.0)
             linear = self.BASE_SPEED * throttle
+
+            # ---- 2f. Update spatial map with detections (using the new linear speed) ----
+            if detections:
+                # dt = 0.05 (fixed 20 Hz) – consistent with main loop
+                self.spatial_map.update(detections, robot_speed=linear, dt=0.05)
 
         # ---- 3. Apply steering ----
         self.steering.set_speed(linear, angular)
@@ -510,17 +493,6 @@ class StateMachine:
 
         # ---- 5. Update lap counting ----
         self._update_lap_count()
-
-    def _get_lidar_tolerance(self, steering_magnitude: float) -> float:
-        """
-        Returns dynamic LIDAR sector tolerance based on steering magnitude.
-        """
-        if steering_magnitude > 0.2:   # Hard steering
-            return 15.0
-        elif steering_magnitude > 0.05: # Moderate
-            return 10.0
-        else:
-            return 5.0   # Straight or slight
 
     def _termination_state(self):
         """Handle termination: open challenge stop or obstacle parking."""
