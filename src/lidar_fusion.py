@@ -1,6 +1,7 @@
 """
 Reads RPLIDAR C1 data via USB and provides range at a given angle.
 Implements sector matching. Thread‑safe scan data access.
+Adds 3‑sample median filtering to eliminate laser dropouts.
 """
 
 import math
@@ -8,27 +9,33 @@ import threading
 import time
 import logging
 from typing import Optional, Tuple, Dict
+from collections import deque
 
-# Use rplidar library (install via pip)
 from rplidar import RPLidar
 
 logger = logging.getLogger(__name__)
 
 
 class LidarFusion:
-    def __init__(self, port: str = '/dev/ttyUSB1', baudrate: int = 460800):
+    def __init__(self, port: str = '/dev/ttyUSB1', baudrate: int = 460800,
+                 median_filter_size: int = 3):
         """
         Initialize LIDAR fusion.
 
         Args:
             port: Serial port of the RPLIDAR (e.g., '/dev/ttyUSB1').
             baudrate: Communication speed. RPLIDAR C1 uses 460800.
+            median_filter_size: Size of median filter for each sector (default 3).
         """
         self.port = port
         self.baudrate = baudrate
+        self.median_filter_size = median_filter_size
         self.lidar: Optional[RPLidar] = None
         self.running = False
-        self.scan_data: Dict[float, float] = {}  # angle (deg) -> distance (m)
+        # Store raw scan data: angle (deg) -> distance (m)
+        self.scan_data: Dict[float, float] = {}
+        # Store history for median filtering: angle -> deque of distances
+        self.scan_history: Dict[float, deque] = {}
         self.lock = threading.Lock()
         self.read_thread = None
 
@@ -68,15 +75,35 @@ class LidarFusion:
         except Exception as e:
             logger.error(f"LIDAR scan error: {e}")
 
+    def _apply_median_filter(self, angle: float, raw_dist: float) -> float:
+        """
+        Apply 3‑sample median filter to smooth raw LIDAR distances.
+        Eliminates individual laser dropouts.
+        """
+        # Store raw distance in history buffer
+        if angle not in self.scan_history:
+            self.scan_history[angle] = deque(maxlen=self.median_filter_size)
+        self.scan_history[angle].append(raw_dist)
+
+        # If we have enough samples, compute median
+        if len(self.scan_history[angle]) >= self.median_filter_size:
+            sorted_vals = sorted(self.scan_history[angle])
+            return sorted_vals[len(sorted_vals) // 2]
+        else:
+            # Not enough samples yet – return raw value
+            return raw_dist
+
     def get_scan_snapshot(self) -> Dict[float, float]:
         """
-        Return a thread‑safe copy of the latest LIDAR scan data.
-
-        Returns:
-            Dictionary: angle (deg) → distance (m).
+        Return a thread‑safe copy of the latest LIDAR scan data,
+        with median filtering applied to each angle.
         """
         with self.lock:
-            return self.scan_data.copy()
+            # Create filtered copy
+            filtered = {}
+            for angle, dist in self.scan_data.items():
+                filtered[angle] = self._apply_median_filter(angle, dist)
+            return filtered
 
     def get_range_at_angle(self, angle_deg: float, tolerance: float = 2.0) -> Optional[float]:
         """
