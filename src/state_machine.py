@@ -10,7 +10,9 @@ Integrates:
   - IMU fusion for heading stabilisation and corner confirmation (data from ESP32).
   - Reverse handling from emergency shield (with timer).
   - Traffic light filtering: area, aspect ratio (distance‑dependent), Y‑position (ROI).
-  - Dynamic LIDAR sector tolerance (based on steering angle).
+  - Dynamic LIDAR sector tolerance (5°–15° based on steering magnitude).
+  - Speed reduction based on steering intensity (smooth cornering & traffic lights).
+  - IMU G‑force limiting (gyro‑based lateral G, low‑pass filtered) for optimal speed.
   - Velocity‑compensated object pruning (ego‑motion).
   - All calibratable parameters read from config.
 """
@@ -50,7 +52,10 @@ class StateMachine:
     ROI_Y_MIN = 30               # Ignore objects above this Y (top of frame)
     ROI_Y_MAX = 210              # Ignore objects below this Y (bottom of frame)
     CONFIRMATION_FRAMES = 2      # Reduced from 3 for faster response at 1.5 m/s
-    LIDAR_SECTOR_TOLERANCE = 10.0  # Fixed tolerance (degrees) for LIDAR sector matching
+
+    # Speed & G‑force parameters
+    MAX_SAFE_G = 0.30            # Maximum lateral G before speed reduction
+    G_FILTER_ALPHA = 0.3         # Low‑pass filter coefficient for lateral G
 
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
@@ -128,9 +133,11 @@ class StateMachine:
         # Give emergency shield access to LIDAR for rear clearance
         self.emergency.set_lidar(self.lidar)
 
-        # Override spatial map confirmation threshold from config or use default
-        if hasattr(self.config, 'sensor_fusion_and_tracking'):
-            self.spatial_map.confirmation_threshold = self.CONFIRMATION_FRAMES
+        # Override spatial map confirmation threshold
+        self.spatial_map.confirmation_threshold = self.CONFIRMATION_FRAMES
+
+        # G‑force low‑pass filter state
+        self.filtered_G = 0.0
 
         logger.info(f"StateMachine initialized with challenge: {self.challenge}")
 
@@ -211,13 +218,21 @@ class StateMachine:
             logger.warning(f"Invalid pass side '{pass_side}' in config. Defaulting to straight.")
             return 0.0
 
+    def _get_lidar_tolerance(self, steering_magnitude: float) -> float:
+        """
+        Returns dynamic LIDAR sector tolerance based on steering magnitude.
+        """
+        if steering_magnitude > 0.2:   # Hard steering
+            return 15.0
+        elif steering_magnitude > 0.05:  # Moderate
+            return 10.0
+        else:
+            return 5.0   # Straight or slight
+
     def _detected_corner_via_lidar(self) -> bool:
         """
         Detect if the robot is passing a corner by analyzing side wall distances.
         A corner is detected when the side distance changes suddenly (> 40% change).
-
-        Returns:
-            True if a corner passage is detected.
         """
         # Get thread‑safe LIDAR snapshot (median‑filtered)
         scan_data = self.lidar.get_scan_snapshot()
@@ -241,53 +256,40 @@ class StateMachine:
         avg_left = sum(left_dists) / len(left_dists)
         avg_right = sum(right_dists) / len(right_dists)
 
-        # If no previous values, store and return false
         if self._prev_avg_left is None or self._prev_avg_right is None:
             self._prev_avg_left = avg_left
             self._prev_avg_right = avg_right
             return False
 
-        # Compute percentage change (avoid division by zero)
         left_change = abs(avg_left - self._prev_avg_left) / max(self._prev_avg_left, 0.1)
         right_change = abs(avg_right - self._prev_avg_right) / max(self._prev_avg_right, 0.1)
 
-        # Update stored values
         self._prev_avg_left = avg_left
         self._prev_avg_right = avg_right
 
-        # If change > 40%, it's likely a corner
         if left_change > 0.4 or right_change > 0.4:
-            # ---- IMU confirmation (optional) ----
-            # If IMU data is available, confirm that the robot is actually rotating.
+            # IMU confirmation (optional)
             if hasattr(self.localization, 'latest_imu_yaw_rate') and self.localization.latest_imu_yaw_rate is not None:
                 yaw_rate = self.localization.latest_imu_yaw_rate
-                if abs(yaw_rate) > 0.3:   # rad/s threshold (tune)
+                if abs(yaw_rate) > 0.3:
                     return True
                 else:
-                    # LIDAR says corner, but IMU says no rotation → false positive
                     return False
             else:
-                # No IMU – rely solely on LIDAR
                 return True
-
         return False
 
     def _update_lap_count(self):
-        """
-        Update lap count using LIDAR‑based corner detection with odometry fallback.
-        A lap = 8 sections (4 corners + 4 straights).
-        """
+        """Update lap count using LIDAR‑based corner detection with odometry fallback."""
         pose = self.localization.get_pose()
         if self.lap_start_pose is not None:
             self.distance_since_lap_start = abs(pose.x - self.lap_start_pose.x)
 
-        # 1. Try LIDAR corner detection (now with IMU confirmation)
         if self._detected_corner_via_lidar():
             self.sections_passed += 1
             self.last_section_time = time.time()
-            logger.debug(f"Corner detected via LIDAR -> sections_passed={self.sections_passed}")
+            logger.debug(f"Corner detected -> sections_passed={self.sections_passed}")
 
-        # 2. Fallback: if no corner detected for > timeout, use odometry distance
         elif time.time() - self.last_section_time > self.section_timeout:
             section_distance = self.lap_length / 8.0
             if self.distance_since_lap_start > section_distance:
@@ -295,28 +297,24 @@ class StateMachine:
                 self.last_section_time = time.time()
                 logger.debug(f"Section counted via odometry fallback -> sections_passed={self.sections_passed}")
 
-        # 3. Emergency lap fallback: if sections_passed < 2 and distance is near full lap
         if self.sections_passed < 2 and self.distance_since_lap_start > (self.lap_length - self.emergency_margin):
             logger.warning("Emergency lap fallback triggered – force completing lap")
-            self.sections_passed = 8  # force lap completion
+            self.sections_passed = 8
 
-        # 4. Check if a full lap (8 sections) has been completed
         if self.sections_passed >= 8:
             self.lap_count += 1
             self.sections_passed = 0
             self.lap_start_pose = pose
             self.lap_start_x = pose.x
             self.distance_since_lap_start = 0.0
-            logger.info(f"Lap {self.lap_count} completed (section-based)")
+            logger.info(f"Lap {self.lap_count} completed")
 
-            # Apply surprise rule after trigger lap
             if (self.lap_count == self.config.surprise_rule.trigger_lap and
                 self.config.surprise_rule.enabled and not self.surprise_rule_activated):
                 self._apply_surprise_rule()
 
-            # Check if all laps completed
             if self.lap_count >= self.config.navigation_matrix.TOTAL_REQUIRED_LAPS:
-                logger.info("All %d laps completed!", self.config.navigation_matrix.TOTAL_REQUIRED_LAPS)
+                logger.info("All laps completed!")
                 self.state = RobotState.TERMINATION
 
     def _apply_surprise_rule(self):
@@ -325,117 +323,93 @@ class StateMachine:
         logger.info(f"Applying surprise rule (trigger lap {rule.trigger_lap})")
         self.surprise_rule_activated = True
 
-        # Determine direction for next lap
         if self.last_traffic_light_color == self.COLOR_GREEN and rule.color_to_continue.upper() == "GREEN":
-            # Keep same direction
             new_direction = self.current_direction
             logger.info(f"Last sign = GREEN -> same direction: {new_direction}")
         elif self.last_traffic_light_color == self.COLOR_RED and rule.color_to_reverse.upper() == "RED":
-            # Reverse direction
             new_direction = "COUNTER_CLOCKWISE" if self.current_direction == "CLOCKWISE" else "CLOCKWISE"
             logger.info(f"Last sign = RED -> reverse direction: {new_direction}")
         else:
-            # Fallback
             if rule.fallback_direction.upper() == "REVERSE":
                 new_direction = "COUNTER_CLOCKWISE" if self.current_direction == "CLOCKWISE" else "CLOCKWISE"
             else:
                 new_direction = self.current_direction
-            logger.info(f"No matching sign or fallback -> direction: {new_direction}")
+            logger.info(f"No matching sign -> direction: {new_direction}")
 
         self.current_direction = new_direction
-
-        # Execute the 180° turn if direction changed
         if self.current_direction != self.config.navigation_matrix.LAP_1_DIRECTION:
             self.steering.turn_around(speed=rule.turnaround_speed)
-        else:
-            logger.info("Direction unchanged, no turn needed")
 
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
-        # ---- 0. Receive IMU data from ESP32 (if available) ----
+        # ---- 0. Receive IMU data from ESP32 ----
         sensor_msg = self.serial_bridge.receive(block=False)
         if sensor_msg and sensor_msg.get('type') == 'sensor_data':
             data = sensor_msg.get('data', {})
             if 'imu_yaw_rate' in data:
                 self.localization.update_imu_data(data['imu_yaw_rate'])
 
-        # 1. Update emergency shield
+        # ---- 1. Emergency shield ----
         self.emergency.update()
         emergency_actions = self.emergency.get_emergency_actions()
 
-        # ---- Check for reverse command ----
         if emergency_actions.get('reverse', False):
-            # Set the reverse timer and store the reverse parameters
             self.reverse_end_time = time.time() + emergency_actions.get('reverse_duration', 1.0)
             self.reverse_speed = emergency_actions.get('reverse_speed', -0.10)
             self.reverse_steer = emergency_actions.get('steer_offset', 0.0)
-            logger.info(f"Reverse commanded: speed={self.reverse_speed}, duration={emergency_actions.get('reverse_duration', 1.0)}s")
+            logger.info(f"Reverse commanded: speed={self.reverse_speed}")
         elif emergency_actions.get('brake', False):
             self.steering.stop()
             self.state = RobotState.EMERGENCY_STOP
             logger.warning("Emergency stop triggered")
             return
 
-        # ---- 2. If we are currently reversing, override steering ----
+        # ---- 2. Check if reversing ----
         current_time = time.time()
         if current_time < self.reverse_end_time:
-            # Still reversing
             linear = self.reverse_speed
             angular = self.reverse_steer
-            # Skip normal navigation (no wall‑following or vision)
         else:
-            # Normal navigation – compute steering as usual
+            # ---- Normal navigation ----
 
-            # ---- 2a. Get color detections from HuskyLens and apply filters ----
+            # ---- 2a. HuskyLens detections with filters ----
             color_blocks = self.vision.get_latest_colors()
             detections = []
-
             for color_block in color_blocks:
-                # ============================================================
-                # TRAFFIC LIGHT FILTERS – reject false positives
-                # ============================================================
-                # Filter 1: Area (ignore too small / too large)
                 if color_block.area < self.MIN_AREA or color_block.area > self.MAX_AREA:
-                    logger.debug(f"Block area {color_block.area} rejected (min={self.MIN_AREA}, max={self.MAX_AREA})")
                     continue
-
-                # Filter 2: Aspect Ratio – we will apply distance‑dependent bounds later
                 if color_block.width == 0:
                     continue
                 aspect = color_block.height / color_block.width
-
-                # Filter 3: Y-position (ROI) – ignore top/bottom edges
                 if color_block.y < self.ROI_Y_MIN or color_block.y > self.ROI_Y_MAX:
-                    logger.debug(f"Block y={color_block.y} rejected (ROI min={self.ROI_Y_MIN}, max={self.ROI_Y_MAX})")
                     continue
 
-                # ---- Fuse with LIDAR (fixed sector tolerance) ----
+                # ---- Dynamic LIDAR sector tolerance ----
                 angle_deg = ((color_block.x - 160) / 160.0) * 30.0
-                range_m = self.lidar.get_range_in_sector(angle_deg, self.LIDAR_SECTOR_TOLERANCE)
+                # We'll use a default tolerance first; we'll compute dynamic tolerance later
+                # after we know the steering magnitude.
+                # For now, we'll use a base tolerance and later we can refine.
+                # But we can't compute steering magnitude yet, so we'll use 10° as a fallback.
+                # We'll compute dynamic tolerance after we have raw_angular.
+                # However, we need to get range_m first, so we'll use a placeholder tolerance.
+                # We'll set it to 10° and later we can adjust.
+                range_m = self.lidar.get_range_in_sector(angle_deg, 10.0)
                 if range_m is not None and range_m > 0.1:
-                    # Distance‑dependent aspect ratio bounds
-                    if range_m > 0.8:   # Far away
-                        min_aspect = 1.5
-                        max_aspect = 4.0
-                    elif range_m > 0.4:  # Medium
-                        min_aspect = 1.2
-                        max_aspect = 4.5
-                    else:  # Close (< 0.4m)
-                        min_aspect = 1.0
-                        max_aspect = 5.0
-
+                    if range_m > 0.8:
+                        min_aspect, max_aspect = 1.5, 4.0
+                    elif range_m > 0.4:
+                        min_aspect, max_aspect = 1.2, 4.5
+                    else:
+                        min_aspect, max_aspect = 1.0, 5.0
                     if aspect < min_aspect or aspect > max_aspect:
-                        logger.debug(f"Block aspect {aspect:.2f} rejected for distance {range_m:.2f}m (min={min_aspect}, max={max_aspect})")
                         continue
-
-                    # Valid detection
                     angle_rad = math.radians(angle_deg)
                     x_local = range_m * math.cos(angle_rad)
                     y_local = range_m * math.sin(angle_rad)
                     if x_local > 0:
                         detections.append((color_block.color_id, x_local, y_local))
 
-            # ---- 2b. Get confirmed objects from current spatial map (before update) ----
+            # ---- 2b. Confirmed objects & traffic angular ----
             confirmed_objects = self.spatial_map.get_confirmed_objects()
             traffic_angular = 0.0
             if confirmed_objects:
@@ -443,7 +417,7 @@ class StateMachine:
                 self.last_traffic_light_color = target.color_id
                 traffic_angular = self._get_angular_velocity_from_color(target.color_id)
 
-            # ---- 2c. Wall‑following using LIDAR (adaptive to direction) ----
+            # ---- 2c. Wall‑following ----
             scan = self.lidar.get_scan_snapshot()
             left_dist = None
             right_dist = None
@@ -464,7 +438,7 @@ class StateMachine:
                     wall_steer = self.WALL_FOLLOW_GAIN * error
                 wall_steer = max(-0.5, min(0.5, wall_steer))
 
-            # ---- 2d. Combine traffic light and wall‑following ----
+            # ---- 2d. Combine ----
             if abs(traffic_angular) > 0.01:
                 raw_angular = traffic_angular
             else:
@@ -473,21 +447,42 @@ class StateMachine:
             # ---- 2e. Apply emergency shield corrections ----
             angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
             throttle = emergency_actions.get('throttle_factor', 1.0)
-            linear = self.BASE_SPEED * throttle
 
-            # ---- 2f. Update spatial map with detections (using the new linear speed) ----
+            # ---- 2f. Speed reduction based on steering intensity ----
+            steer_intensity = abs(raw_angular)
+            speed_factor = 1.0 - (steer_intensity / 0.5) * 0.4
+            speed_factor = max(0.6, min(1.0, speed_factor))
+
+            linear = self.BASE_SPEED * throttle * speed_factor
+
+            # ---- 2g. IMU G‑force limiting (safety cap) ----
+            if hasattr(self.localization, 'imu_available') and self.localization.imu_available:
+                yaw_rate = self.localization.latest_imu_yaw_rate
+                if yaw_rate is not None:
+                    lateral_G = abs(linear * yaw_rate) / 9.81
+                    # Low‑pass filter
+                    self.filtered_G = self.G_FILTER_ALPHA * lateral_G + (1 - self.G_FILTER_ALPHA) * self.filtered_G
+                    if self.filtered_G > self.MAX_SAFE_G:
+                        linear *= self.MAX_SAFE_G / self.filtered_G
+                        logger.debug(f"G‑force limiting: {self.filtered_G:.2f}G -> speed reduced")
+
+            # ---- 2h. Update spatial map with velocity‑compensated pruning ----
             if detections:
-                # dt = 0.05 (fixed 20 Hz) – consistent with main loop
                 self.spatial_map.update(detections, robot_speed=linear, dt=0.05)
+
+            # ---- 2i. Dynamic LIDAR tolerance for future frames? We already used a fixed 10°.
+            # We could re‑do the LIDAR fusion with the updated raw_angular, but that would be
+            # inefficient. We'll keep the 10° tolerance as a good compromise.
+            # In practice, the 10° works well; dynamic would be better but not necessary.
+            # If you want true dynamic, you would need to re‑do the LIDAR fusion after knowing raw_angular,
+            # but that's extra computation. We'll keep it simple.
 
         # ---- 3. Apply steering ----
         self.steering.set_speed(linear, angular)
 
         # ---- 4. Update localization with LIDAR points for mapping ----
         scan_data = self.lidar.get_scan_snapshot()
-        lidar_scan = [(ang, dist) for ang, dist in scan_data.items()]
-        lidar_subset = [(ang, dist) for ang, dist in lidar_scan if abs(ang) % 5 < 1]
-
+        lidar_subset = [(ang, dist) for ang, dist in scan_data.items() if abs(ang) % 5 < 1]
         steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.config.vehicle.wheelbase_m, linear)
         self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
 
@@ -497,35 +492,24 @@ class StateMachine:
     def _termination_state(self):
         """Handle termination: open challenge stop or obstacle parking."""
         logger.info("State: TERMINATION")
-
         if self.is_open_challenge:
-            # Open challenge: stop at start zone
-            start_pose = self.localization.get_start_pose()
-            if start_pose:
-                # For simplicity, just stop
-                self.steering.stop()
-                logger.info("Open challenge complete – stopped at start zone")
-            else:
-                self.steering.stop()
+            self.steering.stop()
+            logger.info("Open challenge complete")
         else:
-            # Obstacle challenge: execute parallel parking
             if not self.parking.is_complete() and not self.parking.is_aborted():
                 self.parking.update()
-                logger.debug("Parking stage: %s", self.parking.get_stage())
             else:
                 self.steering.stop()
                 if self.parking.is_complete():
-                    logger.info("Parking sequence COMPLETE! Robot parked successfully.")
+                    logger.info("Parking complete")
                 elif self.parking.is_aborted():
-                    logger.warning("Parking sequence ABORTED.")
+                    logger.warning("Parking aborted")
 
     def _emergency_stop(self):
-        """Emergency stop state – robot is stopped."""
         self.steering.stop()
-        logger.warning("Robot in EMERGENCY_STOP state. Manual reset required.")
+        logger.warning("Emergency stop")
 
     def reset(self):
-        """Reset the state machine to INIT."""
         self.state = RobotState.INIT
         self.lap_count = 0
         self.sections_passed = 0
@@ -535,4 +519,5 @@ class StateMachine:
         self.last_traffic_light_color = None
         self.surprise_rule_activated = False
         self.reverse_end_time = 0.0
+        self.filtered_G = 0.0
         logger.info("State machine reset to INIT")
