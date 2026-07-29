@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Primary execution entrypoint for WRO Future Engineers 2026.
-Reads a hardware switch to select Open or Obstacle challenge.
-Handles map persistence (save/load/force rebuild) and all initializations.
+Reads hardware switches to select:
+  1. Challenge mode (Open / Obstacle) – GPIO 22
+  2. Driving direction (Clockwise / Counter-Clockwise) – GPIO 23
 All calibratable parameters are read from config.
 """
 
@@ -55,17 +56,27 @@ def main():
     logger.info("Configuration loaded: %s v%s", config.competition, config.version)
 
     # ------------------------------------------------------------------
-    # 2. Read hardware switch to determine challenge mode
+    # 2. Read hardware switches to determine challenge and direction
     # ------------------------------------------------------------------
     GPIO.setmode(GPIO.BCM)
-    GPIO.setup(PiPins.MODE_SELECT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
+    # ---- 2a. Mode switch (GPIO 22) ----
+    GPIO.setup(PiPins.MODE_SELECT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     if GPIO.input(PiPins.MODE_SELECT) == GPIO.LOW:
         challenge = "obstacle"
         logger.info("Hardware switch: OBSTACLE challenge (parallel parking)")
     else:
         challenge = "open"
         logger.info("Hardware switch: OPEN challenge (stop at start)")
+
+    # ---- 2b. Direction switch (GPIO 23) ----
+    GPIO.setup(PiPins.DIRECTION_SELECT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    if GPIO.input(PiPins.DIRECTION_SELECT) == GPIO.LOW:
+        initial_direction = "COUNTER_CLOCKWISE"
+        logger.info("Direction switch: COUNTER-CLOCKWISE")
+    else:
+        initial_direction = "CLOCKWISE"
+        logger.info("Direction switch: CLOCKWISE")
 
     # ------------------------------------------------------------------
     # 3. Initialize hardware interfaces
@@ -79,8 +90,6 @@ def main():
     vision = HuskyLensReader(i2c_bus=1, poll_interval=0.05)
     if not vision.open():
         logger.error("Failed to initialize HuskyLens V2. Check I2C connection.")
-        # Continue anyway – vision is critical, but we don't exit to allow debugging.
-        # In production you may want to exit if vision fails.
     else:
         logger.info("HuskyLens V2 initialized")
 
@@ -97,13 +106,12 @@ def main():
     # ------------------------------------------------------------------
     # 4. Initialize localization with WallMapper
     # ------------------------------------------------------------------
-    # use_map_correction is read from config.mapping.use_mapping
     localization = Localization(
         lidar,
         config,
         use_map_correction=config.mapping.use_mapping
     )
-    logger.info("Localization initialized (map correction enabled: %s)",
+    logger.info("Localization initialized (map correction: %s)",
                 config.mapping.use_mapping)
 
     # ------------------------------------------------------------------
@@ -138,8 +146,8 @@ def main():
         serial_bridge,
         max_speed=config.vehicle.max_speed_mps,
         max_steer_rad=config.vehicle.max_steer_rad,
-        smoothing_alpha=0.25,      # can be made configurable if needed
-        steer_gain=1.0             # can be made configurable if needed
+        smoothing_alpha=0.25,
+        steer_gain=1.0
     )
     logger.info("Steering controller initialized (Ackermann)")
 
@@ -156,7 +164,7 @@ def main():
     logger.info("Parking controller initialized")
 
     # ------------------------------------------------------------------
-    # 9. State Machine
+    # 9. State Machine with hardware-selected direction
     # ------------------------------------------------------------------
     fsm = StateMachine(
         config,
@@ -168,9 +176,11 @@ def main():
         emergency,
         steering,
         parking,
-        challenge=challenge
+        challenge=challenge,
+        initial_direction=initial_direction
     )
-    logger.info("State machine initialized with %s challenge", challenge)
+    logger.info("State machine initialized with %s challenge, %s direction",
+                challenge, initial_direction)
 
     # ------------------------------------------------------------------
     # 10. Setup signal handlers and main loop (20 Hz)
