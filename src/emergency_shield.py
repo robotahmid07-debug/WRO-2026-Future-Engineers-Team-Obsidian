@@ -2,7 +2,9 @@
 Smart Ultrasonic Emergency Shield with Traffic Rule Compliance.
 - Follows traffic light rules (steer LEFT for RED, RIGHT for GREEN).
 - Reverses when critically close (< critical_stop) if rear is clear.
-- If rear is blocked, it hard‑steers in the intended direction and crawls forward.
+- If rear is blocked, it hard‑steers in the intended direction (traffic rule) and crawls forward.
+- If no traffic rule is active (target_steer_direction = 0), it uses LIDAR side distances
+  to steer toward the clearer side (parking lot escape).
 - Uses LIDAR (360°) to check rear clearance before reversing.
 """
 
@@ -63,11 +65,11 @@ class EmergencyShield:
         # Traffic rule target (set by state_machine)
         self.target_steer_direction = 0.0   # -1 = right, +1 = left, 0 = straight
 
-        # Reference to LIDAR (for rear clearance check) – set later by state_machine
+        # Reference to LIDAR (for rear clearance and side clearance checks)
         self.lidar = None
 
     def set_lidar(self, lidar_object):
-        """Set the LIDAR object for rear clearance checks."""
+        """Set the LIDAR object for rear and side clearance checks."""
         self.lidar = lidar_object
 
     def update(self) -> Dict[str, float]:
@@ -115,6 +117,43 @@ class EmergencyShield:
         avg_rear = sum(rear_dists) / len(rear_dists)
         return avg_rear > self.rear_clearance_threshold
 
+    def _get_clearer_side(self) -> float:
+        """
+        Use LIDAR side distances to determine which side (left or right) is clearer.
+        Returns: +1.0 if left is clearer, -1.0 if right is clearer, 0.0 if unknown.
+        """
+        if self.lidar is None:
+            return 0.0
+
+        scan = self.lidar.get_scan_snapshot()
+        if not scan:
+            return 0.0
+
+        left_dists = []
+        right_dists = []
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang - 90) < 10:          # left side
+                left_dists.append(dist)
+            elif abs(ang + 90) < 10:        # right side
+                right_dists.append(dist)
+
+        if not left_dists or not right_dists:
+            return 0.0
+
+        avg_left = sum(left_dists) / len(left_dists)
+        avg_right = sum(right_dists) / len(right_dists)
+
+        # If one side is significantly clearer (e.g., > 0.2 m difference), steer that way
+        diff = avg_left - avg_right
+        if diff > 0.2:
+            return 1.0   # left is clearer
+        elif diff < -0.2:
+            return -1.0  # right is clearer
+        else:
+            return 0.0   # no clear preference
+
     def get_emergency_actions(self) -> Dict[str, any]:
         """
         Returns actions based on current distances.
@@ -150,13 +189,30 @@ class EmergencyShield:
                     'reverse_speed': self.reverse_speed
                 }
             else:
-                # Rear is blocked – cannot reverse. Hard steer in the intended direction and crawl forward.
-                # Apply a stronger steer (1.5x normal) and a low throttle to creep forward.
-                steer_hard = self.target_steer_direction * self.steer_gain * 1.5
-                # Clamp to reasonable range (e.g., ±0.6 rad/s)
+                # Rear is blocked – cannot reverse.
+                # Determine steering direction:
+                # 1. If a traffic rule is active, use it (hard steer in that direction).
+                # 2. Otherwise, use LIDAR to steer toward the clearer side.
+                if abs(self.target_steer_direction) > 0.1:
+                    # Use traffic rule direction
+                    steer_hard = self.target_steer_direction * self.steer_gain * 1.5
+                    logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, rear blocked! "
+                                   f"Hard steer in traffic rule direction: {steer_hard:.2f} rad/s, crawl forward.")
+                else:
+                    # No traffic rule – use LIDAR to find the clearer side
+                    side = self._get_clearer_side()
+                    if abs(side) > 0.1:
+                        steer_hard = side * self.steer_gain * 1.5
+                        logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, rear blocked! "
+                                       f"Hard steer toward clearer side: {steer_hard:.2f} rad/s, crawl forward.")
+                    else:
+                        # No clear side preference – go straight (avoid making a wrong guess)
+                        steer_hard = 0.0
+                        logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, rear blocked, "
+                                       "no clear side preference. Going straight slowly.")
+
+                # Clamp steer_hard to reasonable range (e.g., ±0.6 rad/s)
                 steer_hard = max(-0.6, min(0.6, steer_hard))
-                logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, rear blocked! "
-                               f"Hard steer {steer_hard:.2f} rad/s, crawl forward.")
                 return {
                     'brake': False,
                     'steer_offset': steer_hard,
