@@ -18,7 +18,7 @@
 #define PWM_FREQ 20000
 #define PWM_RES 10
 #define MAX_DUTY 1023
-#define MAX_SPEED_MPS 1.0
+#define MAX_SPEED_MPS 1.5
 #define ULTRASONIC_TIMEOUT 15000   // 15 ms
 
 #define SERVO_CENTER 90
