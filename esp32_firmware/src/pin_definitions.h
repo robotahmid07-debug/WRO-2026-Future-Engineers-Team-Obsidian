@@ -34,16 +34,6 @@
 #define SERVO_PWM        41
 
 // ============================================================
-// Quadrature Encoders (Optional – not used for odometry)
-// ============================================================
-// Encoder A (drive motor or axle)
-#define ENC_A_A          11
-#define ENC_A_B          12
-// Encoder B (if second encoder exists)
-#define ENC_B_A          13
-#define ENC_B_B          14
-
-// ============================================================
 // BNO086 IMU – I2C Bus
 // ============================================================
 // Connected to ESP32-S3 I2C peripheral
