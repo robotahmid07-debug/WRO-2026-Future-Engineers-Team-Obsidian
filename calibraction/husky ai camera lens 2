@@ -11,3 +11,161 @@ ROI_Y_MAX	210
 also must make sure to fix sutter speed to the higest and the camer white colur balance
 gemini suggested
 Pre-Flight Competition ChecklistBefore placing your car on the official WRO track, complete this quick 3-step checklist during practice runs:On-Site Calibration: Re-learn the Red and Green pillar color targets on the official track table under local venue lighting.Speed-Scaled Decay: Ensure robot_speed passed into your spatial map updates dynamically with your current velocity command (e.g., when slowing down for tight turns).Bumper Clearance Purge: Verify that obstacles purge instantly from memory as soon as $y_{\text{local}} \le 0$ so passed pillars never linger as ghost obstacles.You have built a clean, robust, and well-structured architecture. Good luck with your WRO Future Engineers runs!
+To find the optimal mounting height (h) and downward tilt angle (θ) for your HuskyLens 2 with the Wide-Angle Lens Module (107.6 
+∘
+  Horizontal FOV / ≈72 
+∘
+  Vertical FOV), we use trigonometric perspective geometry relative to WRO track dimensions and vehicle mechanics.
+
+1. WRO Track Constraints & Objectives
+Target Pillar Height: 100 mm (10 cm).
+
+Detection Zone:
+
+Far Sightline (d 
+max
+​
+ =80 cm to 100 cm): Gives the robot >0.5 seconds lead time at 1.5 m/s to classify color and plan steering arcs.
+
+Near Sightline (d 
+min
+​
+ ≤15 cm): Keeps the pillar visible in frame until the front bumper and LIDAR take over, preventing close-range blindspots.
+
+Pillar Height in Frame: The top of a 10 cm pillar must stay within the upper ROI boundary (y 
+center
+​
+ ≥30 px) at d 
+min
+​
+ , while the bottom base remains above the floor noise boundary (y 
+center
+​
+ ≤210 px) at d 
+max
+​
+ .
+
+2. The Geometry Math
+                       Horizontal Axis
+                      ┌───────────────────────►
+                      │\
+                      │ \  Upper FOV Edge
+                      │  \
+                      │   \  Optical Axis (Center Line)
+    Camera (Height h) █────θ──────────────────────────►
+                      │   / 
+                      │  /   Lower FOV Edge
+                      │ /
+                      │/
+   ───────────────────┴───────────────────────────────
+                     x_min                     x_max
+                     (Ground Intersection)    (Far Ground Line)
+For a camera mounted at height h with vertical FOV V 
+FOV
+​
+ =72 
+∘
+  (half-angle α=36 
+∘
+ ) tilted downward by angle θ:
+
+Upper Field-of-View Angle: θ 
+upper
+​
+ =θ−36 
+∘
+ 
+
+Lower Field-of-View Angle: θ 
+lower
+​
+ =θ+36 
+∘
+ 
+
+Near Ground Point (d 
+min_ground
+​
+ ):
+
+d 
+min_ground
+​
+ = 
+tan(θ+36 
+∘
+ )
+h
+​
+ 
+3. Solving for Optimal Mounting Parameters
+Step A: Height Selection (h)
+If h is too low (<10 cm), the camera looks straight into the side of the pillar. At 15 cm range, a 10 cm pillar overflows the camera frame vertically.
+
+If h is too high (>22 cm), the center of gravity shifts upward, increasing chassis body roll during 1.5 m/s Ackermann steering turns.
+
+Optimal Height (h): 14 cm to 16 cm from the track surface (measured to the center of the camera lens).
+
+Step B: Tilt Angle Selection (θ)
+Using h=15 cm and targeting d 
+min_ground
+​
+ =10 cm ahead of the lens:
+
+tan(θ+36 
+∘
+ )= 
+d 
+min_ground
+​
+ 
+h
+​
+ = 
+10 cm
+15 cm
+​
+ =1.5
+θ+36 
+∘
+ =arctan(1.5)≈56.3 
+∘
+ 
+θ=56.3 
+∘
+ −36 
+∘
+ =20.3 
+∘
+ 
+4. Verification & Field-of-View Coverage
+With h=15 cm and θ=15 
+∘
+  to 20 
+∘
+  downward tilt:
+
+Metric	Calculated Value	WRO Practical Impact
+Near Ground Point (d 
+min
+​
+ )	10 cm in front of lens	Pillar stays in view until it reaches your front bumper.
+Pillar Height at 15 cm	180 px tall on screen	Fits comfortably within your 240 px vertical sensor frame without clipping.
+Far Ground Sightline (d 
+max
+​
+ )	>120 cm	Horizon line sits near the upper 10% of the screen (perfect for ROI filtering out background room noise).
+Horizontal Track Width at 50 cm	134 cm wide	Covers the full 1 meter track width plus both side walls simultaneously.
+5. Final Recommended Physical Setup
+Lens Height (h): 15 cm above the ground.
+
+Downward Tilt (θ): 15 
+∘
+  to 18 
+∘
+  downward.
+
+Front Bumper Offset: Mount the camera 3–5 cm behind the front bumper edge. This protects the wide-angle lens during wall brushes and places the 10 cm ground sightline right at the bumper tip.
+
+Physical Alignment Check: When the car is placed on the track, a 10 cm traffic light pillar placed 60 cm away should sit right in the center vertical third of the HuskyLens display screen.
