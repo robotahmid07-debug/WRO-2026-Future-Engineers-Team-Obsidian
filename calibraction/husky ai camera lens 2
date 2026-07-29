@@ -9,3 +9,5 @@ MAX_ASPECT	4.0
 ROI_Y_MIN	30	Adjust if the camera is mounted higher/lower.
 ROI_Y_MAX	210
 also must make sure to fix sutter speed to the higest and the camer white colur balance
+gemini suggested
+Pre-Flight Competition ChecklistBefore placing your car on the official WRO track, complete this quick 3-step checklist during practice runs:On-Site Calibration: Re-learn the Red and Green pillar color targets on the official track table under local venue lighting.Speed-Scaled Decay: Ensure robot_speed passed into your spatial map updates dynamically with your current velocity command (e.g., when slowing down for tight turns).Bumper Clearance Purge: Verify that obstacles purge instantly from memory as soon as $y_{\text{local}} \le 0$ so passed pillars never linger as ghost obstacles.You have built a clean, robust, and well-structured architecture. Good luck with your WRO Future Engineers runs!
