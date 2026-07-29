@@ -1,28 +1,25 @@
 /**
- * ESP32-S3 Firmware – Corrected for BNO086 and non‑blocking ultrasonics
- * 
- * Hardware: 1 drive motor + servo, 3 ultrasonics, BNO086 IMU (I2C)
- * Communication: UART to Pi (JSON)
+ * ESP32-S3 Firmware – Single motor + servo, BNO086, 3 ultrasonics
+ * No encoders – removed.
  */
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
-#include <ESP32Encoder.h>
 #include <Servo.h>
 #include <Wire.h>
-#include <Adafruit_BNO08x.h>   // <-- Correct library
+#include <Adafruit_BNO08x.h>
 
 #include "pin_definitions.h"
 
 // ============================================================
-// Constants (updated)
+// Constants
 // ============================================================
 #define UART_BAUD 460800
 #define PWM_FREQ 20000
 #define PWM_RES 10
 #define MAX_DUTY 1023
-#define MAX_SPEED_MPS 1.5
-#define ULTRASONIC_TIMEOUT 15000      // 15 ms (was 30000)
+#define MAX_SPEED_MPS 1.0
+#define ULTRASONIC_TIMEOUT 15000   // 15 ms
 
 #define SERVO_CENTER 90
 #define MAX_STEER_RAD 0.524
@@ -31,7 +28,6 @@
 // Objects
 // ============================================================
 Servo steeringServo;
-ESP32Encoder encoder;
 
 // Ultrasonic distances
 volatile float front_dist = 999.0;
@@ -39,7 +35,7 @@ volatile float front_left_dist = 999.0;
 volatile float front_right_dist = 999.0;
 
 // BNO086
-Adafruit_BNO08x bno;                  // Use BNO08x class
+Adafruit_BNO08x bno;
 volatile float imu_yaw_rate = 0.0;
 unsigned long last_imu_read = 0;
 const unsigned long IMU_READ_INTERVAL = 5000;  // µs (200 Hz)
@@ -58,7 +54,7 @@ const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms
 void setup() {
     Serial.begin(115200);
     while (!Serial) delay(10);
-    Serial.println("ESP32-S3 WRO Firmware (BNO086, 15ms ultrasonic)");
+    Serial.println("ESP32-S3 WRO Firmware (no encoders, BNO086)");
 
     Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
 
@@ -80,40 +76,27 @@ void setup() {
     steeringServo.write(SERVO_CENTER);
     delay(200);
 
-    // Encoder (optional)
-    ESP32Encoder::useInternalWeakPullResistors = UP;
-    encoder.attachHalfQuad(ENC_A_A, ENC_A_B);
-    encoder.clearCount();
-
-    // ---- BNO086 initialization ----
+    // BNO086
     Wire.begin(IMU_SDA, IMU_SCL);
-    if (!bno.begin_I2C(0x4B)) {   // Address 0x4B (common for BNO086)
-        Serial.println("BNO086 not detected at 0x4B – try 0x4A");
-        // Optionally try 0x4A
+    if (!bno.begin_I2C(0x4B)) {
         if (!bno.begin_I2C(0x4A)) {
-            Serial.println("BNO086 not found at either address.");
+            Serial.println("BNO086 not found.");
         } else {
             Serial.println("BNO086 found at 0x4A");
+            bno.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_READ_INTERVAL);
         }
     } else {
         Serial.println("BNO086 found at 0x4B");
-    }
-
-    // Enable calibrated gyro report at 200 Hz (5000 µs)
-    if (bno.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_READ_INTERVAL)) {
-        Serial.println("Calibrated gyro report enabled");
-    } else {
-        Serial.println("Failed to enable gyro report");
+        bno.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_READ_INTERVAL);
     }
 
     Serial.println("Setup complete.");
 }
 
 // ============================================================
-// Ultrasonic reading (non‑blocking version uses pulseIn with shorter timeout)
+// Ultrasonic reading
 // ============================================================
 void readUltrasonic() {
-    // Front
     digitalWrite(FRONT_TRIG, LOW);
     delayMicroseconds(2);
     digitalWrite(FRONT_TRIG, HIGH);
@@ -122,7 +105,6 @@ void readUltrasonic() {
     long duration = pulseIn(FRONT_ECHO, HIGH, ULTRASONIC_TIMEOUT);
     front_dist = (duration > 0) ? duration * 0.034 / 2.0 : 999.0;
 
-    // Front-left
     digitalWrite(FRONT_LEFT_TRIG, LOW);
     delayMicroseconds(2);
     digitalWrite(FRONT_LEFT_TRIG, HIGH);
@@ -131,7 +113,6 @@ void readUltrasonic() {
     duration = pulseIn(FRONT_LEFT_ECHO, HIGH, ULTRASONIC_TIMEOUT);
     front_left_dist = (duration > 0) ? duration * 0.034 / 2.0 : 999.0;
 
-    // Front-right
     digitalWrite(FRONT_RIGHT_TRIG, LOW);
     delayMicroseconds(2);
     digitalWrite(FRONT_RIGHT_TRIG, HIGH);
@@ -142,28 +123,25 @@ void readUltrasonic() {
 }
 
 // ============================================================
-// IMU reading (BNO086)
+// IMU reading
 // ============================================================
 void readIMU() {
     sh2_gyroscope_calibrated_t gyro;
     if (bno.getSensorEvent(&gyro)) {
-        imu_yaw_rate = gyro.z;   // rad/s, already in rad/s
+        imu_yaw_rate = gyro.z;   // rad/s
     }
 }
 
 // ============================================================
-// Send sensor data (JSON) to Pi
+// Send sensor data
 // ============================================================
 void sendSensorData() {
-    int64_t enc = encoder.getCount();
-
     String msg = "{";
     msg += "\"type\":\"sensor_data\",";
     msg += "\"data\":{";
     msg += "\"front\":" + String(front_dist) + ",";
     msg += "\"front_left\":" + String(front_left_dist) + ",";
     msg += "\"front_right\":" + String(front_right_dist) + ",";
-    msg += "\"enc\":" + String(enc) + ",";
     msg += "\"imu_yaw_rate\":" + String(imu_yaw_rate, 6);
     msg += "}";
 
@@ -213,35 +191,30 @@ void applyServoAngle(float angle_rad) {
 }
 
 // ============================================================
-// Main loop (non‑blocking with 15ms ultrasonic timeout)
+// Main loop
 // ============================================================
 void loop() {
-    // Ultrasonics every 20 ms
     static unsigned long last_ultra = 0;
     if (millis() - last_ultra > 20) {
         last_ultra = millis();
         readUltrasonic();
     }
 
-    // IMU every 5 ms (200 Hz)
     if (micros() - last_imu_read >= IMU_READ_INTERVAL) {
         last_imu_read = micros();
         readIMU();
     }
 
-    // Send sensor data every 50 ms
     if (millis() - last_sensor_send > SENSOR_SEND_INTERVAL) {
         last_sensor_send = millis();
         sendSensorData();
     }
 
-    // Process incoming commands
     while (Serial2.available()) {
         String line = Serial2.readStringUntil('\n');
         if (line.length() > 0) processCommand(line);
     }
 
-    // Apply motor/servo if new command
     if (new_cmd) {
         applyMotorSpeed(target_speed);
         applyServoAngle(target_steer);
