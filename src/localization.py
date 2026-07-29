@@ -72,6 +72,9 @@ class Localization:
         self.imu_filtered = 0.0
         self.imu_filter_alpha = 0.3
 
+        # Flag indicating whether IMU data has been received at least once
+        self.imu_available = False   # <-- ADDED
+
     # ==========================================================
     # IMU Data Update (called from state_machine)
     # ==========================================================
@@ -88,6 +91,7 @@ class Localization:
         else:
             self.imu_filtered = yaw_rate
         self.latest_imu_yaw_rate = self.imu_filtered
+        self.imu_available = True   # <-- ADDED: mark IMU as active
 
     # ==========================================================
     # Pose Registration
