@@ -1,8 +1,8 @@
 """
 Smart Ultrasonic Emergency Shield with Traffic Rule Compliance.
 - Follows traffic light rules (steer LEFT for RED, RIGHT for GREEN).
-- Reverses when critically close (< critical_stop) but only if the rear is clear.
-- Reverse distance = 10 cm (tunable via reverse_speed and reverse_duration).
+- Reverses when critically close (< critical_stop) if rear is clear.
+- If rear is blocked, it hard‑steers in the intended direction and crawls forward.
 - Uses LIDAR (360°) to check rear clearance before reversing.
 """
 
@@ -150,12 +150,17 @@ class EmergencyShield:
                     'reverse_speed': self.reverse_speed
                 }
             else:
-                # Rear is blocked – cannot reverse. Stop and steer hard.
-                logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, but rear blocked! Hard stop + steer.")
+                # Rear is blocked – cannot reverse. Hard steer in the intended direction and crawl forward.
+                # Apply a stronger steer (1.5x normal) and a low throttle to creep forward.
+                steer_hard = self.target_steer_direction * self.steer_gain * 1.5
+                # Clamp to reasonable range (e.g., ±0.6 rad/s)
+                steer_hard = max(-0.6, min(0.6, steer_hard))
+                logger.warning(f"CRITICAL: Front obstacle at {dist_f:.1f} cm, rear blocked! "
+                               f"Hard steer {steer_hard:.2f} rad/s, crawl forward.")
                 return {
-                    'brake': True,
-                    'steer_offset': self.target_steer_direction * self.steer_gain,
-                    'throttle_factor': 0.0,
+                    'brake': False,
+                    'steer_offset': steer_hard,
+                    'throttle_factor': 0.3,      # Slow crawl (30% speed)
                     'reverse': False,
                     'reverse_duration': 0.0,
                     'reverse_speed': 0.0
