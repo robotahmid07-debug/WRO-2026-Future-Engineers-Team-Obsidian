@@ -2,7 +2,7 @@
 Global execution FSM (INIT -> NAVIGATE -> TERMINATION).
 Supports both Open and Obstacle challenges.
 Integrates:
-  - Per‑lap direction switching (CW/CCW) from YAML.
+  - Per‑lap direction switching (CW/CCW) from hardware switch (GPIO 23).
   - Adaptive wall‑following (left/right reference based on direction).
   - Surprise rule (Lap X -> Lap X+1 direction change based on traffic light color).
   - Emergency lap fallback (force lap completion if LIDAR fails).
@@ -10,7 +10,6 @@ Integrates:
   - IMU fusion for heading stabilisation and corner confirmation (data from ESP32).
   - Reverse handling from emergency shield (with timer).
   - Traffic light filtering: area, aspect ratio (distance‑dependent), Y‑position (ROI).
-  - Dynamic LIDAR sector tolerance (5°–15° based on steering magnitude).
   - Speed reduction based on steering intensity (smooth cornering & traffic lights).
   - IMU G‑force limiting (gyro‑based lateral G, low‑pass filtered) for optimal speed.
   - Velocity‑compensated object pruning (ego‑motion).
@@ -57,17 +56,22 @@ class StateMachine:
     MAX_SAFE_G = 0.30            # Maximum lateral G before speed reduction
     G_FILTER_ALPHA = 0.3         # Low‑pass filter coefficient for lateral G
 
+    # LIDAR sector tolerance (fixed 10° – efficient and sufficient)
+    LIDAR_SECTOR_TOLERANCE = 10.0
+
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
                  spatial_map: SpatialMap, emergency_shield: EmergencyShield,
                  steering: SteeringController, parking: ParkingController,
-                 challenge: str = "open"):
+                 challenge: str = "open",
+                 initial_direction: str = "CLOCKWISE"):
         """
         Initialize the state machine.
 
         Args:
             config: Parsed SystemConfig object.
             challenge: "open" or "obstacle" – selects which challenge mode to run.
+            initial_direction: "CLOCKWISE" or "COUNTER_CLOCKWISE" – from hardware switch.
         """
         self.config = config
         self.serial_bridge = serial_bridge
@@ -99,10 +103,11 @@ class StateMachine:
         self.distance_since_lap_start = 0.0
         self.lap_start_x = 0.0
 
-        # Direction tracking
-        self.current_direction = self.config.navigation_matrix.LAP_1_DIRECTION.upper()
+        # Direction tracking – read from hardware switch (overrides YAML)
+        self.current_direction = initial_direction.upper()
         self.last_traffic_light_color = None
         self.surprise_rule_activated = False
+        logger.info(f"Direction set by hardware switch: {self.current_direction}")
 
         # Read all calibratable parameters from config
         self.BASE_SPEED = self.config.navigation.base_speed_mps
@@ -181,8 +186,7 @@ class StateMachine:
         self.last_traffic_light_color = None
         self.surprise_rule_activated = False
 
-        # Set initial direction from YAML
-        self.current_direction = self.config.navigation_matrix.LAP_1_DIRECTION.upper()
+        # Direction is already set from hardware switch – log it
         logger.info(f"Lap 1 direction: {self.current_direction}")
 
         # Reset LIDAR corner detection history
@@ -217,17 +221,6 @@ class StateMachine:
         else:
             logger.warning(f"Invalid pass side '{pass_side}' in config. Defaulting to straight.")
             return 0.0
-
-    def _get_lidar_tolerance(self, steering_magnitude: float) -> float:
-        """
-        Returns dynamic LIDAR sector tolerance based on steering magnitude.
-        """
-        if steering_magnitude > 0.2:   # Hard steering
-            return 15.0
-        elif steering_magnitude > 0.05:  # Moderate
-            return 10.0
-        else:
-            return 5.0   # Straight or slight
 
     def _detected_corner_via_lidar(self) -> bool:
         """
@@ -384,17 +377,11 @@ class StateMachine:
                 if color_block.y < self.ROI_Y_MIN or color_block.y > self.ROI_Y_MAX:
                     continue
 
-                # ---- Dynamic LIDAR sector tolerance ----
+                # ---- LIDAR fusion with fixed 10° tolerance ----
                 angle_deg = ((color_block.x - 160) / 160.0) * 30.0
-                # We'll use a default tolerance first; we'll compute dynamic tolerance later
-                # after we know the steering magnitude.
-                # For now, we'll use a base tolerance and later we can refine.
-                # But we can't compute steering magnitude yet, so we'll use 10° as a fallback.
-                # We'll compute dynamic tolerance after we have raw_angular.
-                # However, we need to get range_m first, so we'll use a placeholder tolerance.
-                # We'll set it to 10° and later we can adjust.
-                range_m = self.lidar.get_range_in_sector(angle_deg, 10.0)
+                range_m = self.lidar.get_range_in_sector(angle_deg, self.LIDAR_SECTOR_TOLERANCE)
                 if range_m is not None and range_m > 0.1:
+                    # Distance‑dependent aspect ratio bounds
                     if range_m > 0.8:
                         min_aspect, max_aspect = 1.5, 4.0
                     elif range_m > 0.4:
@@ -417,7 +404,7 @@ class StateMachine:
                 self.last_traffic_light_color = target.color_id
                 traffic_angular = self._get_angular_velocity_from_color(target.color_id)
 
-            # ---- 2c. Wall‑following ----
+            # ---- 2c. Wall‑following (adaptive to direction) ----
             scan = self.lidar.get_scan_snapshot()
             left_dist = None
             right_dist = None
@@ -434,7 +421,7 @@ class StateMachine:
                 error = left_dist - right_dist
                 if self.current_direction == "CLOCKWISE":
                     wall_steer = -self.WALL_FOLLOW_GAIN * error
-                else:
+                else:  # COUNTER_CLOCKWISE
                     wall_steer = self.WALL_FOLLOW_GAIN * error
                 wall_steer = max(-0.5, min(0.5, wall_steer))
 
@@ -469,13 +456,6 @@ class StateMachine:
             # ---- 2h. Update spatial map with velocity‑compensated pruning ----
             if detections:
                 self.spatial_map.update(detections, robot_speed=linear, dt=0.05)
-
-            # ---- 2i. Dynamic LIDAR tolerance for future frames? We already used a fixed 10°.
-            # We could re‑do the LIDAR fusion with the updated raw_angular, but that would be
-            # inefficient. We'll keep the 10° tolerance as a good compromise.
-            # In practice, the 10° works well; dynamic would be better but not necessary.
-            # If you want true dynamic, you would need to re‑do the LIDAR fusion after knowing raw_angular,
-            # but that's extra computation. We'll keep it simple.
 
         # ---- 3. Apply steering ----
         self.steering.set_speed(linear, angular)
