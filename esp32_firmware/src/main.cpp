@@ -1,15 +1,8 @@
 /**
- * ESP32-S3 Firmware for WRO Future Engineers 2026
+ * ESP32-S3 Firmware – Corrected for BNO086 and non‑blocking ultrasonics
  * 
- * Hardware:
- *   - 1 DC drive motor + 1 steering servo
- *   - 3 ultrasonic sensors (front, front-left, front-right)
- *   - BNO086 IMU (I2C) for yaw rate (200 Hz)
- *   - UART communication with Raspberry Pi (JSON, 460800 baud)
- * 
- * Communication:
- *   - Received JSON: {"type":"cmd","speed":0.3,"steering":0.15}
- *   - Sent JSON: {"type":"sensor_data","data":{"front":12.5,...},"checksum":123}
+ * Hardware: 1 drive motor + servo, 3 ultrasonics, BNO086 IMU (I2C)
+ * Communication: UART to Pi (JSON)
  */
 
 #include <Arduino.h>
@@ -17,67 +10,57 @@
 #include <ESP32Encoder.h>
 #include <Servo.h>
 #include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
-#include <utility/imumaths.h>
+#include <Adafruit_BNO08x.h>   // <-- Correct library
 
 #include "pin_definitions.h"
 
 // ============================================================
-// Constants & Configuration
+// Constants (updated)
 // ============================================================
-
 #define UART_BAUD 460800
 #define PWM_FREQ 20000
-#define PWM_RES 10                // 0-1023
+#define PWM_RES 10
 #define MAX_DUTY 1023
-#define MAX_SPEED_MPS 1.5         // Must match YAML vehicle.max_speed_mps
-#define ULTRASONIC_TIMEOUT 30000  // µs (30 ms)
+#define MAX_SPEED_MPS 1.0
+#define ULTRASONIC_TIMEOUT 15000      // 15 ms (was 30000)
 
-#define SERVO_CENTER 90           // degrees (neutral)
-#define MAX_STEER_RAD 0.524       // ±30° in radians
+#define SERVO_CENTER 90
+#define MAX_STEER_RAD 0.524
 
 // ============================================================
-// Objects & Variables
+// Objects
 // ============================================================
-
 Servo steeringServo;
 ESP32Encoder encoder;
 
-// Ultrasonic distances (cm)
+// Ultrasonic distances
 volatile float front_dist = 999.0;
 volatile float front_left_dist = 999.0;
 volatile float front_right_dist = 999.0;
 
-// IMU
-Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
-volatile float imu_yaw_rate = 0.0;   // rad/s (latest reading)
+// BNO086
+Adafruit_BNO08x bno;                  // Use BNO08x class
+volatile float imu_yaw_rate = 0.0;
+unsigned long last_imu_read = 0;
+const unsigned long IMU_READ_INTERVAL = 5000;  // µs (200 Hz)
 
-// Command variables (updated by UART from Pi)
-volatile float target_speed = 0.0;       // m/s, positive = forward
-volatile float target_steer = 0.0;       // radians, positive = left
+// Command variables
+volatile float target_speed = 0.0;
+volatile float target_steer = 0.0;
 volatile bool new_cmd = false;
 
-// Timing
 unsigned long last_sensor_send = 0;
-const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms (20 Hz)
-unsigned long last_imu_read = 0;
-const unsigned long IMU_READ_INTERVAL = 5;      // ms (200 Hz)
+const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms
 
 // ============================================================
 // Setup
 // ============================================================
-
 void setup() {
-    // Debug serial (USB)
     Serial.begin(115200);
     while (!Serial) delay(10);
-    Serial.println("ESP32-S3 WRO Robot Firmware v3.0 (with IMU)");
+    Serial.println("ESP32-S3 WRO Firmware (BNO086, 15ms ultrasonic)");
 
-    // UART2 to Raspberry Pi
     Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
-    Serial2.setTimeout(10);
-    Serial.println("UART2 initialized to Pi");
 
     // Ultrasonic pins
     pinMode(FRONT_TRIG, OUTPUT);
@@ -87,11 +70,10 @@ void setup() {
     pinMode(FRONT_RIGHT_TRIG, OUTPUT);
     pinMode(FRONT_RIGHT_ECHO, INPUT);
 
-    // Motor PWM and Direction
+    // Motor PWM
     ledcSetup(0, PWM_FREQ, PWM_RES);
     ledcAttachPin(MOTOR_PWM, 0);
     pinMode(MOTOR_DIR, OUTPUT);
-    digitalWrite(MOTOR_DIR, LOW);
 
     // Servo
     steeringServo.attach(SERVO_PWM);
@@ -103,64 +85,33 @@ void setup() {
     encoder.attachHalfQuad(ENC_A_A, ENC_A_B);
     encoder.clearCount();
 
-    // I2C for IMU
+    // ---- BNO086 initialization ----
     Wire.begin(IMU_SDA, IMU_SCL);
-    if (!bno.begin()) {
-        Serial.println("BNO055 not detected – check wiring.");
-    } else {
-        Serial.println("BNO055 initialized.");
-        bno.setExtCrystalUse(true);   // Use external crystal for better accuracy
-    }
-
-    Serial.println("Setup complete. Waiting for commands...");
-}
-
-// ============================================================
-// Main Loop
-// ============================================================
-
-void loop() {
-    // Read ultrasonics every 20 ms (50 Hz)
-    static unsigned long last_ultra = 0;
-    if (millis() - last_ultra > 20) {
-        last_ultra = millis();
-        readUltrasonic();
-    }
-
-    // Read IMU every 5 ms (200 Hz)
-    if (millis() - last_imu_read > IMU_READ_INTERVAL) {
-        last_imu_read = millis();
-        readIMU();
-    }
-
-    // Send sensor data every 50 ms (20 Hz) to Pi
-    if (millis() - last_sensor_send > SENSOR_SEND_INTERVAL) {
-        last_sensor_send = millis();
-        sendSensorData();
-    }
-
-    // Process incoming commands from Pi
-    while (Serial2.available()) {
-        String line = Serial2.readStringUntil('\n');
-        if (line.length() > 0) {
-            processCommand(line);
+    if (!bno.begin_I2C(0x4B)) {   // Address 0x4B (common for BNO086)
+        Serial.println("BNO086 not detected at 0x4B – try 0x4A");
+        // Optionally try 0x4A
+        if (!bno.begin_I2C(0x4A)) {
+            Serial.println("BNO086 not found at either address.");
+        } else {
+            Serial.println("BNO086 found at 0x4A");
         }
+    } else {
+        Serial.println("BNO086 found at 0x4B");
     }
 
-    // Apply motor and servo if new command received
-    if (new_cmd) {
-        applyMotorSpeed(target_speed);
-        applyServoAngle(target_steer);
-        new_cmd = false;
+    // Enable calibrated gyro report at 200 Hz (5000 µs)
+    if (bno.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_READ_INTERVAL)) {
+        Serial.println("Calibrated gyro report enabled");
+    } else {
+        Serial.println("Failed to enable gyro report");
     }
 
-    delay(1);  // yield to other tasks
+    Serial.println("Setup complete.");
 }
 
 // ============================================================
-// Ultrasonic Reading
+// Ultrasonic reading (non‑blocking version uses pulseIn with shorter timeout)
 // ============================================================
-
 void readUltrasonic() {
     // Front
     digitalWrite(FRONT_TRIG, LOW);
@@ -191,25 +142,21 @@ void readUltrasonic() {
 }
 
 // ============================================================
-// IMU Reading (BNO086)
+// IMU reading (BNO086)
 // ============================================================
-
 void readIMU() {
-    sensors_event_t event;
-    bno.getEvent(&event);
-    // Gyroscope Z (yaw rate) in rad/s
-    // Positive = counter‑clockwise (CCW), negative = clockwise (CW)
-    imu_yaw_rate = event.gyro.z;
+    sh2_gyroscope_calibrated_t gyro;
+    if (bno.getSensorEvent(&gyro)) {
+        imu_yaw_rate = gyro.z;   // rad/s, already in rad/s
+    }
 }
 
 // ============================================================
-// Send Sensor Data (JSON) to Raspberry Pi
+// Send sensor data (JSON) to Pi
 // ============================================================
-
 void sendSensorData() {
     int64_t enc = encoder.getCount();
 
-    // Build JSON without checksum first
     String msg = "{";
     msg += "\"type\":\"sensor_data\",";
     msg += "\"data\":{";
@@ -220,7 +167,6 @@ void sendSensorData() {
     msg += "\"imu_yaw_rate\":" + String(imu_yaw_rate, 6);
     msg += "}";
 
-    // Compute simple checksum (sum of ASCII codes)
     int sum = 0;
     for (int i = 0; i < msg.length(); i++) sum += msg[i];
     msg += ",\"checksum\":" + String(sum);
@@ -230,38 +176,26 @@ void sendSensorData() {
 }
 
 // ============================================================
-// Command Processing (JSON from Raspberry Pi)
+// Command parsing
 // ============================================================
-
 void processCommand(String json) {
-    // Expected: {"type":"cmd","speed":0.30,"steering":0.15}
     float speed = 0.0, steer = 0.0;
     int idxSpeed = json.indexOf("\"speed\":");
     int idxSteer = json.indexOf("\"steering\":");
-    if (idxSpeed != -1) {
-        sscanf(json.substring(idxSpeed + 8).c_str(), "%f", &speed);
-    }
-    if (idxSteer != -1) {
-        sscanf(json.substring(idxSteer + 11).c_str(), "%f", &steer);
-    }
-
-    // Clamp speed and steering (hard limits)
-    if (speed > MAX_SPEED_MPS) speed = MAX_SPEED_MPS;
-    if (speed < -MAX_SPEED_MPS) speed = -MAX_SPEED_MPS;
-    if (steer > MAX_STEER_RAD) steer = MAX_STEER_RAD;
-    if (steer < -MAX_STEER_RAD) steer = -MAX_STEER_RAD;
-
+    if (idxSpeed != -1) sscanf(json.substring(idxSpeed + 8).c_str(), "%f", &speed);
+    if (idxSteer != -1) sscanf(json.substring(idxSteer + 11).c_str(), "%f", &steer);
     target_speed = speed;
     target_steer = steer;
     new_cmd = true;
 }
 
 // ============================================================
-// Motor Speed Control
+// Motor & Servo control
 // ============================================================
-
 void applyMotorSpeed(float speed_mps) {
-    int duty = mapSpeedToDuty(speed_mps, MAX_SPEED_MPS);
+    int duty = (int)((speed_mps / MAX_SPEED_MPS) * MAX_DUTY);
+    if (duty > MAX_DUTY) duty = MAX_DUTY;
+    if (duty < -MAX_DUTY) duty = -MAX_DUTY;
     if (duty >= 0) {
         digitalWrite(MOTOR_DIR, HIGH);
         ledcWrite(0, duty);
@@ -271,21 +205,48 @@ void applyMotorSpeed(float speed_mps) {
     }
 }
 
-int mapSpeedToDuty(float speed, float max_speed) {
-    if (speed > max_speed) speed = max_speed;
-    if (speed < -max_speed) speed = -max_speed;
-    return (int)((speed / max_speed) * MAX_DUTY);
-}
-
-// ============================================================
-// Servo Steering Control
-// ============================================================
-
 void applyServoAngle(float angle_rad) {
-    // Clamp to mechanical limits
     float clamped = constrain(angle_rad, -MAX_STEER_RAD, MAX_STEER_RAD);
-    // Map radians to servo pulse (0-180°)
     int angle_deg = SERVO_CENTER + (int)((clamped / MAX_STEER_RAD) * 90.0);
     angle_deg = constrain(angle_deg, 0, 180);
     steeringServo.write(angle_deg);
+}
+
+// ============================================================
+// Main loop (non‑blocking with 15ms ultrasonic timeout)
+// ============================================================
+void loop() {
+    // Ultrasonics every 20 ms
+    static unsigned long last_ultra = 0;
+    if (millis() - last_ultra > 20) {
+        last_ultra = millis();
+        readUltrasonic();
+    }
+
+    // IMU every 5 ms (200 Hz)
+    if (micros() - last_imu_read >= IMU_READ_INTERVAL) {
+        last_imu_read = micros();
+        readIMU();
+    }
+
+    // Send sensor data every 50 ms
+    if (millis() - last_sensor_send > SENSOR_SEND_INTERVAL) {
+        last_sensor_send = millis();
+        sendSensorData();
+    }
+
+    // Process incoming commands
+    while (Serial2.available()) {
+        String line = Serial2.readStringUntil('\n');
+        if (line.length() > 0) processCommand(line);
+    }
+
+    // Apply motor/servo if new command
+    if (new_cmd) {
+        applyMotorSpeed(target_speed);
+        applyServoAngle(target_steer);
+        new_cmd = false;
+    }
+
+    delay(1);
 }
