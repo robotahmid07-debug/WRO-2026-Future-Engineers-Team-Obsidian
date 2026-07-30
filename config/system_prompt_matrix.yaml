@@ -188,7 +188,7 @@ system_prompt_matrix:
   # 12. NAVIGATION & BEHAVIOR
   # ==========================================
   navigation:
-    base_speed_mps: 1.0               # Cruise speed during navigation
+    base_speed_mps: 1.5               # Cruise speed during navigation
     steer_magnitude_radps: 0.3        # Yaw rate when turning for traffic lights
     wall_follow_gain: 0.25            # Proportional gain for wall‑following
 
