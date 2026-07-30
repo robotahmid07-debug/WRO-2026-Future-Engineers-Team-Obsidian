@@ -428,7 +428,7 @@ class StateMachine:
             if left_dist is not None and right_dist is not None:
                 error = left_dist - right_dist
                 if self.current_direction == "CLOCKWISE":
-                    wall_steer = -self.WALL_FOLLOW_GAIN * error
+                    wall_steer = self.WALL_FOLLOW_GAIN * error
                 else:  # COUNTER_CLOCKWISE
                     wall_steer = self.WALL_FOLLOW_GAIN * error
                 wall_steer = max(-0.5, min(0.5, wall_steer))
