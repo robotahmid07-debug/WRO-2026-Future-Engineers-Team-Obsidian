@@ -4,6 +4,8 @@ Primary execution entrypoint for WRO Future Engineers 2026.
 Reads hardware switches to select:
   1. Challenge mode (Open / Obstacle) – GPIO 22
   2. Driving direction (Clockwise / Counter-Clockwise) – GPIO 23
+  3. Start button (GPIO 26) – must be pressed to begin the round
+
 All calibratable parameters are read from config.
 """
 
@@ -13,7 +15,7 @@ import signal
 import logging
 from pathlib import Path
 
-# GPIO for mode selection
+# GPIO for mode selection and start button
 import RPi.GPIO as GPIO
 
 # Add src to path
@@ -78,6 +80,10 @@ def main():
         initial_direction = "CLOCKWISE"
         logger.info("Direction switch: CLOCKWISE")
 
+    # ---- 2c. Start button (GPIO 26) ----
+    START_BUTTON_PIN = 26   # Physical pin 37
+    GPIO.setup(START_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
     # ------------------------------------------------------------------
     # 3. Initialize hardware interfaces
     # ------------------------------------------------------------------
@@ -90,6 +96,8 @@ def main():
     vision = HuskyLensReader(i2c_bus=1, poll_interval=0.05)
     if not vision.open():
         logger.error("Failed to initialize HuskyLens V2. Check I2C connection.")
+        # Continue anyway – vision is critical, but we don't exit to allow debugging.
+        # In production you may want to exit if vision fails.
     else:
         logger.info("HuskyLens V2 initialized")
 
@@ -183,7 +191,15 @@ def main():
                 challenge, initial_direction)
 
     # ------------------------------------------------------------------
-    # 10. Setup signal handlers and main loop (20 Hz)
+    # 10. Wait for Start button (WRO rules)
+    # ------------------------------------------------------------------
+    logger.info("Waiting for Start button (GPIO 26)...")
+    while GPIO.input(START_BUTTON_PIN) == GPIO.HIGH:
+        time.sleep(0.01)   # Small delay to avoid busy-waiting
+    logger.info("Start button pressed – starting the round!")
+
+    # ------------------------------------------------------------------
+    # 11. Setup signal handlers and main loop (20 Hz)
     # ------------------------------------------------------------------
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -211,7 +227,7 @@ def main():
             time.sleep(0.1)
 
     # ------------------------------------------------------------------
-    # 11. Save map if enabled
+    # 12. Save map if enabled
     # ------------------------------------------------------------------
     if config.mapping.save_map_to_disk and localization.is_map_ready():
         try:
@@ -223,7 +239,7 @@ def main():
         logger.info("Map saving disabled by configuration")
 
     # ------------------------------------------------------------------
-    # 12. Cleanup
+    # 13. Cleanup
     # ------------------------------------------------------------------
     logger.info("Shutting down...")
     steering.stop()
