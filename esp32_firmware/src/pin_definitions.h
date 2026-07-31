@@ -22,11 +22,14 @@
 #define FRONT_RIGHT_ECHO 16
 
 // ============================================================
-// Motor Driver (TB6612FNG / L298N / BTS 7960 compatible)
+// Motor Driver (BTS 7960) – Two PWM pins (forward & reverse)
 // ============================================================
-// Single drive motor – PWM speed and Direction
-#define MOTOR_PWM        1
-#define MOTOR_DIR        2
+// Single drive motor – forward PWM and reverse PWM
+#define MOTOR_FWD_PWM    1   // RPWM
+#define MOTOR_REV_PWM    2   // LPWM
+
+// Enable pins (R_EN and L_EN) – we'll pull them HIGH in setup
+#define MOTOR_EN         3   // optional, can be tied to 3.3V directly
 
 // ============================================================
 // Steering Servo (Ackermann steering)
@@ -36,7 +39,6 @@
 // ============================================================
 // BNO086 IMU – I2C Bus
 // ============================================================
-// Connected to ESP32-S3 I2C peripheral
 #define IMU_SDA          8
 #define IMU_SCL          9
 
