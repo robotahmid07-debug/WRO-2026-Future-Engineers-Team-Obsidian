@@ -1,6 +1,6 @@
 # ==========================================
 #  Written by Team Obsidian
-#  Update date : 2026-07-26
+#  Update date : 2026-07-31
 # ==========================================
 
 system_prompt_matrix:
@@ -72,7 +72,7 @@ system_prompt_matrix:
         tolerance_radius_m: 0.20
 
       debouncing_and_persistence:
-        confirmation_threshold_frames: 3
+        confirmation_threshold_frames: 2
         frame_loss_tolerance_sec: 1.5
         prune_condition: "Y_LOCAL < 0.0"
 
@@ -85,46 +85,165 @@ system_prompt_matrix:
   # ==========================================
   ultrasonic_emergency_shield:
     enabled: True
+    # ---- Feature toggles (new) ----
+    enable_reverse: True                # Enable/disable reverse on critical stop
+    enable_rear_check: True             # Enable/disable LIDAR rear check before reverse
+    enable_hard_shield: True            # Enable/disable the 5 cm hard shield (last‑resort)
+    enable_hard_steer: True             # Enable/disable hard steer + crawl when rear blocked
+
     thresholds_cm:
       front_stop: 12.0                  # Start reducing speed
-      front_left_safety: 18.0           # Steer right if left side close
-      front_right_safety: 18.0          # Steer left if right side close
-      critical_stop: 8.0                # Reverse if closer than this
+      front_left_safety: 18.0           # Side avoidance trigger
+      front_right_safety: 18.0
+      critical_stop: 8.0                # Reverse/hard steer trigger
+      hard_shield_cm: 5.0               # <-- NEW: Last‑resort emergency threshold
+
     dynamic_throttle:
       enable_speed_dampening: True
       dampened_speed_factor: 0.60
 
-  # ==========================================
-  # 4. SURPRISE TASK & DYNAMIC RULES
-  # ==========================================
-  traffic_light_passing_rules:
-    RED_BLOCK_PASS_SIDE: "RIGHT"
-    GREEN_BLOCK_PASS_SIDE: "LEFT"
-    INVERT_COLORS_MID_RACE: False
+    # ---- Reverse parameters (tuneable) ----
+    reverse_params:
+      speed_mps: -0.10                  # m/s (negative = reverse)
+      duration_s: 1.0                   # seconds
+      rear_clearance_threshold_m: 0.15  # meters (15 cm)
 
   # ==========================================
-  # 5. NAVIGATION & LAP COUNTING (BASE)
+  # 4. NAVIGATION & SPEED CONTROL (Challenge-Specific)
   # ==========================================
-  navigation_matrix:
-    TOTAL_REQUIRED_LAPS: 3
-    LAP_1_DIRECTION: "CLOCKWISE"
-    LAP_2_DIRECTION: "CLOCKWISE"
-    LAP_3_DIRECTION: "CLOCKWISE"
+  navigation:
+    # ---- Open Challenge (fast, aggressive) ----
+    open_challenge:
+      base_speed_mps: 1.5
+      wall_follow_gain: 0.30            # More aggressive centering
+      steer_magnitude_radps: 0.35       # Sharper turns
+      straight_boost_factor: 1.20       # 20% boost on straights
+      corner_slowdown_max_reduction: 0.3 # Max speed reduction from steering intensity
+      predictive_slowdown_gain: 0.3     # Gain for derivative‑based slowdown
+
+      # ---- PID wall‑following gains ----
+      pid:
+        kp: 25.0
+        ki: 0.1
+        kd: 8.0
+
+      # ---- Corner detection ----
+      corner_detection:
+        use_derivative: True            # Enable derivative‑based detection
+        use_percentage: True            # Enable 40% percentage detection
+        use_graded_steering: True       # Enable graded steering (partial → full)
+        use_imu_confirmation: True      # Enable IMU confirmation
+        lidar_derivative_threshold: 0.3 # m/s change – sensitivity
+        pct_threshold: 0.4              # 40% change threshold
+        imu_confirm_threshold_radps: 0.3 # rad/s – IMU confirmation
+
+      # ---- G‑force limiting ----
+      g_force:
+        max_safe_g: 0.30                # Maximum lateral G before speed reduction
+        filter_alpha: 0.3               # Low‑pass filter coefficient
+
+    # ---- Obstacle Challenge (more conservative) ----
+    obstacle_challenge:
+      base_speed_mps: 1.3
+      wall_follow_gain: 0.25
+      steer_magnitude_radps: 0.30
+      straight_boost_factor: 1.10
+      corner_slowdown_max_reduction: 0.4
+      predictive_slowdown_gain: 0.4
+
+      # ---- PID wall‑following gains ----
+      pid:
+        kp: 25.0
+        ki: 0.1
+        kd: 8.0
+
+      # ---- Corner detection ----
+      corner_detection:
+        use_derivative: True
+        use_percentage: True
+        use_graded_steering: True
+        use_imu_confirmation: True
+        lidar_derivative_threshold: 0.25
+        pct_threshold: 0.4
+        imu_confirm_threshold_radps: 0.3
+
+      # ---- G‑force limiting ----
+      g_force:
+        max_safe_g: 0.28                # Slightly lower for safety
+        filter_alpha: 0.3
+
+      # ---- Traffic light specific (Obstacle only) ----
+      traffic_light:
+        distance_slowdown_start_m: 2.0
+        distance_slowdown_min_factor: 0.4
+        steering_slowdown_max_reduction: 0.4
+        lidar_confirm_range_m: 2.5
 
   # ==========================================
-  # 6. PARKING CONFIGURATION (LIDAR-based)
+  # 5. SURPRISE RULE
   # ==========================================
-  # These values are used by parking_controller.py.
-  # They are hardcoded in the code, but you can override them here.
+  surprise_rule:
+    enabled: True
+    trigger_lap: 2
+    color_to_continue: "GREEN"
+    color_to_reverse: "RED"
+    fallback_direction: "REVERSE"
+    turnaround_speed: 0.1               # m/s during U‑turn
+
+  # ==========================================
+  # 6. LAP COUNTING
+  # ==========================================
+  lap_counting:
+    lap_length_m: 12.0
+    section_fallback_timeout_s: 3.0
+    emergency_lap_margin_m: 0.2
+
+  # ==========================================
+  # 7. VEHICLE PHYSICAL PARAMETERS
+  # ==========================================
+  vehicle:
+    wheelbase_m: 0.25
+    max_speed_mps: 1.5                  # Absolute hard limit (never exceed this)
+    max_steer_rad: 0.524                # 30°
+
+  # ==========================================
+  # 8. MAPPING CONFIGURATION
+  # ==========================================
+  mapping:
+    use_mapping: True
+    save_map_to_disk: True
+    load_map_from_disk: True
+    force_rebuild: False
+
+  # ==========================================
+  # 9. VISION (HuskyLens)
+  # ==========================================
+  vision:
+    color_red_id: 1
+    color_green_id: 2
+
+  # ==========================================
+  # 10. PARKING CONFIGURATION (Emergency Shield during Parking)
+  # ==========================================
   parking:
-    rear_wall_target_m: 0.05           # 5 cm from rear wall
-    side_wall_target_m: 0.10           # 10 cm from side wall
-    alignment_tolerance_m: 0.02        # 2 cm tolerance
-    approach_speed_mps: 0.10           # Speed during approach
-    reverse_speed_mps: -0.12           # Speed during reverse
+    emergency_shield:
+      enabled: True
+      use_parking_thresholds: True      # If True, use the thresholds below
+      thresholds_cm:
+        front_stop: 8.0                 # Allow closer approach
+        front_left_safety: 10.0         # Less side avoidance during parking
+        front_right_safety: 10.0
+        critical_stop: 4.0              # Allow closer before reversing
+        hard_shield_cm: 3.0             # Last‑resort (still active)
+      dynamic_throttle:
+        enable_speed_dampening: True
+        dampened_speed_factor: 0.60
+      disable_reverse: False            # Set True to prevent reversing during parking
+      disable_hard_steer: False         # Set True to prevent hard steer + crawl
+      disable_hard_shield: False        # Set True to disable the hard shield during parking
 
   # ==========================================
-  # 7. STATE MACHINE EXECUTION (DESCRIPTIVE)
+  # 11. STATE MACHINE EXECUTION (DESCRIPTIVE)
   # ==========================================
   state_machine:
     STATE_1_INIT:
@@ -147,54 +266,3 @@ system_prompt_matrix:
           - Target saved `start_pose` and perform smooth deceleration to full stop.
       - If Challenge == "OBSTACLE" and Laps == 3:
           - Navigate to saved `parking_slot_geometry` and trigger 4-stage Parallel Parking sequence using LIDAR 360°.
-
-  # ==========================================
-  # 8. MAPPING CONFIGURATION
-  # ==========================================
-  mapping:
-    use_mapping: True                 # Enable/disable mapping entirely
-    save_map_to_disk: True            # Save map after each round (non‑volatile)
-    load_map_from_disk: True          # Load existing map at startup
-    force_rebuild: False              # If True, delete existing map and rebuild fresh
-
-  # ==========================================
-  # 9. SURPRISE RULE (LAP X → LAP X+1)
-  # ==========================================
-  surprise_rule:
-    enabled: True                     # Enable/disable the rule
-    trigger_lap: 2                    # Which lap triggers the rule (default 2)
-    color_to_continue: "GREEN"        # If last traffic light = this, continue same direction
-    color_to_reverse: "RED"           # If last traffic light = this, reverse direction
-    fallback_direction: "REVERSE"     # If no traffic light detected → "REVERSE" or "SAME"
-    turnaround_speed: 0.1             # Speed during 180° turn (m/s)
-
-  # ==========================================
-  # 10. LAP COUNTING & ODOMETRY FALLBACK
-  # ==========================================
-  lap_counting:
-    lap_length_m: 12.0                # Full lap distance (calibrate to your track)
-    section_fallback_timeout_s: 3.0   # Time without corner detection before using odometry section fallback
-    emergency_lap_margin_m: 0.2       # Margin below full lap to trigger emergency lap completion
-
-  # ==========================================
-  # 11. VEHICLE PHYSICAL PARAMETERS
-  # ==========================================
-  vehicle:
-    wheelbase_m: 0.25                 # Distance between front and rear axles (meters)
-    max_speed_mps: 1.5                # Maximum forward speed (m/s)
-    max_steer_rad: 0.524              # Maximum steering angle (radians) ~30°
-
-  # ==========================================
-  # 12. NAVIGATION & BEHAVIOR
-  # ==========================================
-  navigation:
-    base_speed_mps: 1.5               # Cruise speed during navigation
-    steer_magnitude_radps: 0.3        # Yaw rate when turning for traffic lights
-    wall_follow_gain: 0.25            # Proportional gain for wall‑following
-
-  # ==========================================
-  # 13. VISION (HUSKYLENS)
-  # ==========================================
-  vision:
-    color_red_id: 1                   # Learned ID for RED on HuskyLens
-    color_green_id: 2                 # Learned ID for GREEN on HuskyLens
