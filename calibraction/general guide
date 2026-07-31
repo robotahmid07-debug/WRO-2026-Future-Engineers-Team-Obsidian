@@ -1,0 +1,160 @@
+📐 The Ultimate Calibration Guide – WRO 2026 Future Engineers
+This guide covers every tuneable parameter in your codebase – both in YAML and hardcoded values – with clear instructions on when, how, and why to calibrate each one.
+
+🧭 Overview – Calibration Categories
+Category	Where	Parameters	Priority
+Physical Measurements	YAML (vehicle)	Wheelbase, max speed, max steering angle	🔴 High
+Speed Control	YAML (navigation)	Base speed, boost, corner slowdown, predictive gain	🔴 High
+Wall‑Following	YAML (navigation)	Wall‑follow gain, PID gains	🔴 High
+Corner Detection	YAML (navigation.corner_detection)	Derivative threshold, percentage threshold, toggles	🟡 Medium
+Traffic Lights	YAML (navigation.obstacle_challenge.traffic_light)	Distance start, min factor, LIDAR confirm range	🟡 Medium
+Emergency Shield	YAML (ultrasonic_emergency_shield)	Stop/side/critical/hard shield thresholds, toggles	🔴 High
+Parking	YAML (parking.emergency_shield)	Parking‑specific thresholds, toggles	🟡 Medium
+Lap Counting	YAML (lap_counting)	Lap length, timeout, emergency margin	🔴 High
+G‑Force Limiting	YAML (navigation.g_force)	Max safe G, filter alpha	🟡 Medium
+Hardcoded (ESP32)	main.cpp	MAX_SPEED_MPS	🔴 High
+Hardcoded (Python)	steering_controller.py, emergency_shield.py	Reverse speed, reverse duration, rear clearance threshold	🟡 Medium
+📂 Part 1: YAML Parameters – How to Calibrate
+1. Vehicle Physical Parameters (vehicle)
+Parameter	Default	What It Does	How to Calibrate
+wheelbase_m	0.25	Distance between front and rear axles (m).	Measure with a ruler – centre of front axle to centre of rear axle.
+max_speed_mps	1.5	Absolute speed limit (m/s).	Start at 1.5, increase gradually until unstable, then reduce by 0.1.
+max_steer_rad	0.524	Maximum steering angle (radians).	Measure servo max angle (e.g., 30° = 0.524 rad).
+2. Navigation Speed Parameters (navigation.open_challenge / obstacle_challenge)
+Parameter	Default	What It Does	How to Calibrate
+base_speed_mps	1.5 / 1.3	Cruising speed.	Test lap times – increase until cornering becomes unstable.
+straight_boost_factor	1.20 / 1.10	Speed multiplier on straights.	Increase if car feels slow on straights; decrease if unstable.
+corner_slowdown_max_reduction	0.3 / 0.4	Max speed reduction in corners (0.3 = 30% reduction at max steer).	Increase if car understeers; decrease if car is too slow in corners.
+predictive_slowdown_gain	0.3 / 0.4	How aggressively the car slows based on error derivative.	Increase if car enters corners too fast; decrease if too slow.
+3. Wall‑Following & PID (navigation.pid)
+Parameter	Default	What It Does	How to Calibrate
+wall_follow_gain	0.30 / 0.25	Proportional gain for centering.	If car oscillates → decrease. If car drifts to one side → increase.
+kp	25.0	Proportional gain (PID).	Start with default; increase for faster response, decrease for stability.
+ki	0.1	Integral gain (PID).	Increase to eliminate steady‑state error (if car consistently hugs one wall).
+kd	8.0	Derivative gain (PID).	Increase to reduce oscillation; decrease if car is jerky.
+4. Corner Detection (navigation.corner_detection)
+Parameter	Default	What It Does	How to Calibrate
+use_derivative	True	Enable derivative‑based detection.	Keep True unless you have false positives.
+use_percentage	True	Enable 40% change detection.	Keep True – it adds robustness.
+use_graded_steering	True	Enable partial → full steering.	Keep True for smooth cornering.
+use_imu_confirmation	True	Enable IMU confirmation.	Keep True to prevent false positives.
+lidar_derivative_threshold	0.3	Sensitivity of derivative detection.	Decrease (e.g., 0.2) if corners are missed; increase (e.g., 0.4) if false positives.
+pct_threshold	0.4	40% change threshold.	Adjust if corner detection is too early/late.
+imu_confirm_threshold_radps	0.3	IMU yaw rate threshold.	Decrease if corners are missed; increase if false positives.
+5. Traffic Lights (navigation.obstacle_challenge.traffic_light)
+Parameter	Default	What It Does	How to Calibrate
+distance_slowdown_start_m	2.0	Distance at which slowdown begins.	Increase for earlier slowdown; decrease for later.
+distance_slowdown_min_factor	0.4	Minimum speed factor at close range.	Increase if car is too slow near pillar; decrease if too fast.
+steering_slowdown_max_reduction	0.4	Max speed reduction from steering intensity.	Increase if car turns too sharply; decrease if car is too slow.
+lidar_confirm_range_m	2.5	LIDAR confirmation range.	Increase if LIDAR has longer range; decrease if unreliable.
+6. Emergency Shield (ultrasonic_emergency_shield)
+Parameter	Default	What It Does	How to Calibrate
+front_stop	12.0	Distance to start slowing down (cm).	Increase if car brakes too late; decrease if too early.
+front_left_safety / front_right_safety	18.0	Side avoidance trigger distance (cm).	Increase if car hits side walls; decrease if too sensitive.
+critical_stop	8.0	Distance to reverse/hard steer (cm).	Increase if car gets too close; decrease if too sensitive.
+hard_shield_cm	5.0	Last‑resort emergency distance (cm).	Keep as safety net – adjust only if false triggers occur.
+enable_reverse	True	Enable reverse on critical stop.	Keep True for safety.
+enable_hard_shield	True	Enable hard shield.	Keep True for safety.
+enable_hard_steer	True	Enable hard steer + crawl.	Keep True for parking lot escape.
+7. Parking (parking.emergency_shield)
+Parameter	Default	What It Does	How to Calibrate
+front_stop	8.0	Relaxed front stop during parking (cm).	Increase if parking is too tight; decrease if too sensitive.
+critical_stop	4.0	Relaxed critical stop during parking (cm).	Allow closer approach – 4 cm is safe.
+hard_shield_cm	3.0	Relaxed hard shield during parking (cm).	Keep as last‑resort safety.
+disable_reverse	False	Disable reverse during parking.	Set True if reverse interferes with parking.
+disable_hard_steer	False	Disable hard steer during parking.	Set True if hard steer interferes with parking.
+8. Lap Counting (lap_counting)
+Parameter	Default	What It Does	How to Calibrate
+lap_length_m	12.0	Full lap distance (m).	Push car around track, measure distance, update.
+section_fallback_timeout_s	3.0	Time before odometry fallback (s).	Decrease if corners are missed; increase if false positives.
+emergency_lap_margin_m	0.2	Distance margin for emergency lap completion.	Keep as safety net – adjust if laps are force‑completed too often.
+9. G‑Force Limiting (navigation.g_force)
+Parameter	Default	What It Does	How to Calibrate
+max_safe_g	0.30	Maximum lateral G before speed reduction.	Increase (0.35) if car is stable at high speed; decrease (0.25) if rolling over.
+filter_alpha	0.3	Low‑pass filter coefficient.	Increase for faster response; decrease for smoother.
+📂 Part 2: Hardcoded Parameters (Code-Level)
+1. ESP32 Firmware (esp32_firmware/src/main.cpp)
+Parameter	Default	What It Does	How to Calibrate
+MAX_SPEED_MPS	1.5	Absolute speed limit (must match YAML).	Change this AND YAML max_speed_mps together. Re‑upload firmware.
+ULTRASONIC_TIMEOUT	15000	Ultrasonic pulse timeout (µs).	Keep at 15000 (15 ms) – enough for ~2.5 m range.
+2. src/steering_controller.py
+Parameter	Default	What It Does	How to Calibrate
+self.reverse_speed	-0.10	Speed during reverse (m/s).	Increase if reverse is too slow; decrease if too fast.
+self.reverse_duration	1.0	Duration of reverse (s).	Increase if car doesn't reverse enough; decrease if too much.
+self.rear_clearance_threshold	0.15	Rear clearance required before reversing (m).	Increase if car hits objects while reversing; decrease if too cautious.
+3. src/state_machine.py (Constants)
+Parameter	Default	What It Does	How to Calibrate
+MIN_AREA	120	Minimum pixel area for traffic light detection.	Increase if too many false positives; decrease if pillars are missed.
+MAX_AREA	18000	Maximum pixel area for traffic light detection.	Decrease if large objects are mistaken for pillars.
+MIN_ASPECT	1.5	Minimum aspect ratio (height/width) for pillars.	Increase if square objects are detected; decrease if pillars are missed.
+MAX_ASPECT	4.0	Maximum aspect ratio for pillars.	Increase if tall objects are missed; decrease if false positives.
+ROI_Y_MIN	30	Y‑position minimum for detection.	Adjust based on camera mounting height.
+ROI_Y_MAX	210	Y‑position maximum for detection.	Adjust based on camera mounting height.
+🧪 Calibration Procedure – Step by Step
+Step 1: Measure Physical Parameters (Off‑Track)
+Parameter	How to Measure
+wheelbase_m	Use a ruler – front axle centre to rear axle centre.
+max_steer_rad	Turn servo to max, measure wheel angle, convert to radians.
+lap_length_m	Push car around the track, measure distance with a tape measure.
+Step 2: Test Standalone (No Track)
+Test	What to Check
+Ultrasonic sensors	Check distances in logs – ensure all 3 sensors are reading correctly.
+IMU	Check imu_yaw_rate in logs – should be ~0 when stationary.
+HuskyLens	Check color detections – RED/GREEN IDs match YAML.
+Motor + Servo	Test set_speed(0.3, 0) – car moves forward. Test set_speed(0, 0.3) – servo turns.
+Step 3: Test on Track – Open Challenge
+Priority	Parameter	Initial Value	Tuning Method
+1	base_speed_mps	1.5	Increase until unstable, then reduce by 0.1.
+2	wall_follow_gain	0.30	If oscillates → decrease; if drifts → increase.
+3	corner_slowdown_max_reduction	0.3	Increase if understeer; decrease if too slow.
+4	straight_boost_factor	1.20	Increase if straight feels slow; decrease if unstable.
+5	MAX_SAFE_G	0.30	Increase if cornering feels safe; decrease if rollover.
+Step 4: Test on Track – Obstacle Challenge
+Priority	Parameter	Initial Value	Tuning Method
+1	distance_slowdown_start_m	2.0	Increase if car approaches pillars too fast; decrease if too slow.
+2	distance_slowdown_min_factor	0.4	Increase if car is too slow near pillars; decrease if too fast.
+3	lidar_confirm_range_m	2.5	Increase if LIDAR has longer range; decrease if unreliable.
+4	parking.emergency_shield.thresholds_cm	Defaults	Test parking – adjust if car touches walls or stops too early.
+5	surprise_rule.turnaround_speed	0.1	Increase if U‑turn is too slow; decrease if unstable.
+Step 5: Test Surprise Rule
+What to Test	How
+Trigger lap	Set trigger_lap: 1 and run – check that U‑turn happens after Lap 1.
+Color detection	Ensure the last traffic light colour triggers the correct direction.
+U‑turn speed	Adjust turnaround_speed if the turn is too slow or jerky.
+📋 Calibration Checklist (Print This)
+Parameter	File	Default	Measured Value	Date
+Wheelbase	vehicle.wheelbase_m	0.25	____ m	
+Max Speed	vehicle.max_speed_mps	1.5	____ m/s	
+Max Steering Angle	vehicle.max_steer_rad	0.524	____ rad	
+Lap Length	lap_counting.lap_length_m	12.0	____ m	
+Base Speed	navigation.base_speed_mps	1.5/1.3	____ m/s	
+Wall‑Following Gain	navigation.wall_follow_gain	0.30/0.25	____	
+PID Kp	navigation.pid.kp	25.0	____	
+PID Ki	navigation.pid.ki	0.1	____	
+PID Kd	navigation.pid.kd	8.0	____	
+Corner Derivative Threshold	navigation.corner_detection.lidar_derivative_threshold	0.3	____	
+G‑Force Max	navigation.g_force.max_safe_g	0.30	____	
+Front Stop	ultrasonic_emergency_shield.thresholds_cm.front_stop	12.0	____ cm	
+Critical Stop	ultrasonic_emergency_shield.thresholds_cm.critical_stop	8.0	____ cm	
+Hard Shield	ultrasonic_emergency_shield.thresholds_cm.hard_shield_cm	5.0	____ cm	
+Traffic Light Slowdown Start	navigation.obstacle_challenge.traffic_light.distance_slowdown_start_m	2.0	____ m	
+ESP32 Max Speed	main.cpp → MAX_SPEED_MPS	1.5	____	
+🧪 Tuning Tips – When to Change What
+Symptom	What to Change	Where
+Car oscillates on straights	Decrease wall_follow_gain	YAML
+Car misses corners	Decrease lidar_derivative_threshold	YAML
+Car too slow in corners	Decrease corner_slowdown_max_reduction	YAML
+Car too fast in corners	Increase corner_slowdown_max_reduction	YAML
+Car hits walls	Increase front_stop or front_left/right_safety	YAML
+Car stops too early	Decrease front_stop	YAML
+Car reverses unnecessarily	Increase critical_stop	YAML
+Parking fails	Adjust parking.emergency_shield.thresholds_cm	YAML
+Traffic light missed	Decrease lidar_confirm_range_m	YAML
+U‑turn too slow	Increase turnaround_speed	YAML
+Car rolls over	Decrease MAX_SAFE_G	YAML
+✅ Final Answer
+Question	Answer
+Is this guide complete?	✅ Yes – covers every tuneable parameter.
+What's the most important calibration?	wall_follow_gain, corner_slowdown_max_reduction, and MAX_SAFE_G.
+When to calibrate?	Before competition – during practice rounds.
+How to know it's correct?	The car completes laps without touching walls and parks reliably.
