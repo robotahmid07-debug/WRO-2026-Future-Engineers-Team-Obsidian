@@ -2,13 +2,14 @@
 Reads RPLIDAR C1 data via USB and provides range at a given angle.
 Implements sector matching. Thread‑safe scan data access.
 Adds 3‑sample median filtering to eliminate laser dropouts.
+Provides front distance extraction for curvature estimation.
 """
 
 import math
 import threading
 import time
 import logging
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 from collections import deque
 
 from rplidar import RPLidar
@@ -104,6 +105,21 @@ class LidarFusion:
             for angle, dist in self.scan_data.items():
                 filtered[angle] = self._apply_median_filter(angle, dist)
             return filtered
+
+    def get_front_distances(self, half_width_deg: float = 30.0) -> List[float]:
+        """
+        Return distances in the front sector (±half_width_deg) for curvature estimation.
+        """
+        scan = self.get_scan_snapshot()
+        if not scan:
+            return []
+        front_dists = []
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang) < half_width_deg:
+                front_dists.append(dist)
+        return front_dists
 
     def get_range_at_angle(self, angle_deg: float, tolerance: float = 2.0) -> Optional[float]:
         """
