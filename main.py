@@ -97,7 +97,6 @@ def main():
     if not vision.open():
         logger.error("Failed to initialize HuskyLens V2. Check I2C connection.")
         # Continue anyway – vision is critical, but we don't exit to allow debugging.
-        # In production you may want to exit if vision fails.
     else:
         logger.info("HuskyLens V2 initialized")
 
@@ -158,6 +157,9 @@ def main():
         steer_gain=1.0
     )
     logger.info("Steering controller initialized (Ackermann)")
+
+    # Pass localization to steering for IMU U‑turn
+    steering.set_localization(localization)
 
     # ------------------------------------------------------------------
     # 7. Emergency shield (smart avoidance)
