@@ -15,6 +15,7 @@ Integrates:
   - Map usage control (enable/disable mapping).
   - Reverse handling from emergency shield (with timer).
   - Parking mode activation for emergency shield (during parking).
+  - Direct navigation to parking lot using LIDAR‑based localization.
   - All calibratable parameters read from config.
 """
 
@@ -259,13 +260,30 @@ class StateMachine:
         else:
             return 0.0
 
+    def _compute_wall_steer(self) -> float:
+        """Compute wall‑following steering from LIDAR side distances."""
+        scan = self.lidar.get_scan_snapshot()
+        left_dist = None
+        right_dist = None
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang - 90) < 10:
+                left_dist = dist if left_dist is None or dist < left_dist else left_dist
+            elif abs(ang + 90) < 10:
+                right_dist = dist if right_dist is None or dist < right_dist else right_dist
+        if left_dist is not None and right_dist is not None:
+            error = left_dist - right_dist
+            return self.WALL_FOLLOW_GAIN * error
+        return 0.0
+
     def _update_lap_count(self):
         """Update lap count using LIDAR‑based corner detection with odometry fallback."""
         pose = self.localization.get_pose()
         if self.lap_start_pose is not None:
             self.distance_since_lap_start = abs(pose.x - self.lap_start_pose.x)
 
-        # Corner detection is now handled inside _navigate_state()
+        # Corner detection is handled inside _navigate_state()
         # The sections_passed is incremented there.
 
         # Emergency lap fallback
@@ -313,7 +331,6 @@ class StateMachine:
 
         # Execute U‑turn if direction changed (use IMU if available)
         if self.current_direction != self.config.navigation_matrix.LAP_1_DIRECTION:
-            # Use IMU‑based U‑turn if available, else fallback
             self.steering.turn_around_imu(speed=rule.turnaround_speed)
         else:
             logger.info("Direction unchanged, no turn needed")
@@ -413,7 +430,6 @@ class StateMachine:
                 error = left_dist - right_dist
 
                 # PID wall‑following (P‑only for now, full PID ready)
-                # For now, we use proportional control to keep it simple and stable
                 wall_steer = self.WALL_FOLLOW_GAIN * error
                 wall_steer = max(-0.5, min(0.5, wall_steer))
 
@@ -454,9 +470,6 @@ class StateMachine:
                             if imu_confirmed:
                                 steer_multiplier = 1.0
                             wall_steer = wall_steer * steer_multiplier
-                        else:
-                            # No grading – use full steering
-                            pass  # wall_steer already set
 
                         # Count the corner
                         self.sections_passed += 1
@@ -518,14 +531,13 @@ class StateMachine:
                 boost_factor = self.STRAIGHT_BOOST
 
             # ---- 2j. Final speed ----
-            # Combine all factors
             combined_factor = steer_factor * predictive_factor * distance_factor
             linear = self.BASE_SPEED * throttle * combined_factor * boost_factor
 
             # Clamp to max speed
             linear = min(linear, self.config.vehicle.max_speed_mps)
 
-            # ---- 2k. IMU G‑force limiting (safety cap) ----
+            # ---- 2k. IMU G‑force limiting ----
             if hasattr(self.localization, 'imu_available') and self.localization.imu_available:
                 yaw_rate = self.localization.latest_imu_yaw_rate
                 if yaw_rate is not None:
@@ -552,23 +564,74 @@ class StateMachine:
         self._update_lap_count()
 
     def _termination_state(self):
-        """Handle termination: open challenge stop or obstacle parking."""
+        """Handle termination: open challenge stop or obstacle parking with direct navigation."""
         logger.info("State: TERMINATION")
+
         if self.is_open_challenge:
             self.steering.stop()
             logger.info("Open challenge complete")
+            return
+
+        # ---- Obstacle challenge: navigate to parking spot ----
+        current_pose = self.localization.get_pose()
+        start_pose = self.localization.get_start_pose()
+
+        if start_pose is None:
+            logger.error("Start pose not registered – cannot park!")
+            self.steering.stop()
+            return
+
+        # Distance and heading to target (parking spot)
+        dx = start_pose.x - current_pose.x
+        dy = start_pose.y - current_pose.y
+        distance = math.hypot(dx, dy)
+        target_heading = math.atan2(dy, dx)
+
+        # Heading error (normalised to [-pi, pi])
+        heading_error = target_heading - current_pose.theta
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+
+        # If close enough and facing correct direction, start parking
+        if distance < 0.3 and abs(heading_error) < math.pi / 6:
+            logger.info(f"Arrived at parking spot (dist={distance:.2f}m) – starting parking")
+            self._start_parking()
+            return
+
+        # ---- Drive toward parking spot ----
+        logger.info(f"Driving to parking spot (dist={distance:.2f}m, heading error={math.degrees(heading_error):.1f}°)")
+
+        # Compute wall‑following steering (to keep on track)
+        wall_steer = self._compute_wall_steer()
+
+        # Steering correction to align with target heading
+        # Simple proportional control
+        steer_correction = 0.5 * heading_error   # gain, can be tuned
+        steer_correction = max(-0.3, min(0.3, steer_correction))
+
+        # Blend: 70% navigation, 30% wall‑following for stability
+        final_steer = 0.7 * steer_correction + 0.3 * wall_steer
+        final_steer = max(-0.4, min(0.4, final_steer))
+
+        # Speed: reduce as we get closer
+        if distance < 0.8:
+            speed = 0.15   # crawl
         else:
-            # Enable parking mode for emergency shield
-            self.emergency.set_parking_mode(True)
-            if not self.parking.is_complete() and not self.parking.is_aborted():
-                self.parking.update()
-            else:
-                self.steering.stop()
-                self.emergency.set_parking_mode(False)
-                if self.parking.is_complete():
-                    logger.info("Parking complete")
-                elif self.parking.is_aborted():
-                    logger.warning("Parking aborted")
+            speed = 0.3
+
+        self.steering.set_speed(speed, final_steer)
+
+    def _start_parking(self):
+        """Start the parking sequence."""
+        self.emergency.set_parking_mode(True)
+        if not self.parking.is_complete() and not self.parking.is_aborted():
+            self.parking.update()
+        else:
+            self.steering.stop()
+            self.emergency.set_parking_mode(False)
+            if self.parking.is_complete():
+                logger.info("Parking complete")
+            elif self.parking.is_aborted():
+                logger.warning("Parking aborted")
 
     def _emergency_stop(self):
         self.steering.stop()
