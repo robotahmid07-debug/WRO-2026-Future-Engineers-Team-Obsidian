@@ -2,7 +2,8 @@
  * ESP32-S3 Firmware for WRO Future Engineers 2026
  * 
  * Hardware:
- *   - 1 DC drive motor + 1 steering servo
+ *   - 1 DC drive motor with BTS 7960 driver (two PWM pins)
+ *   - 1 steering servo
  *   - 3 ultrasonic sensors (front, front-left, front-right)
  *   - BNO086 IMU (I2C) for yaw rate (200 Hz)
  *   - UART communication with Raspberry Pi (JSON, 460800 baud)
@@ -29,7 +30,7 @@
 #define PWM_RES 10                // 0-1023
 #define MAX_DUTY 1023
 #define MAX_SPEED_MPS 1.5         // Must match YAML vehicle.max_speed_mps
-#define ULTRASONIC_TIMEOUT 15000  // 15 ms (was 30000)
+#define ULTRASONIC_TIMEOUT 15000  // 15 ms
 
 #define SERVO_CENTER 90
 #define MAX_STEER_RAD 0.524       // ±30° in radians
@@ -66,11 +67,10 @@ const unsigned long SENSOR_SEND_INTERVAL = 50;  // ms (20 Hz)
 void setup() {
     Serial.begin(115200);
     while (!Serial) delay(10);
-    Serial.println("ESP32-S3 WRO Firmware (BNO086, 15ms ultrasonic)");
+    Serial.println("ESP32-S3 WRO Firmware (BTS7960, BNO086)");
 
     Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
     Serial2.setTimeout(10);
-    Serial.println("UART2 initialized to Pi");
 
     // Ultrasonic pins
     pinMode(FRONT_TRIG, OUTPUT);
@@ -80,20 +80,25 @@ void setup() {
     pinMode(FRONT_RIGHT_TRIG, OUTPUT);
     pinMode(FRONT_RIGHT_ECHO, INPUT);
 
-    // Motor PWM and Direction
+    // ---- Motor driver (BTS 7960) ----
+    // Motor PWM pins
     ledcSetup(0, PWM_FREQ, PWM_RES);
-    ledcAttachPin(MOTOR_PWM, 0);
-    pinMode(MOTOR_DIR, OUTPUT);
-    digitalWrite(MOTOR_DIR, LOW);
+    ledcAttachPin(MOTOR_FWD_PWM, 0);
+    ledcSetup(1, PWM_FREQ, PWM_RES);
+    ledcAttachPin(MOTOR_REV_PWM, 1);
 
-    // Servo
+    // Enable pins (pull HIGH to enable the driver)
+    // If you hardwire EN pins to 3.3V, you can skip this
+    pinMode(MOTOR_EN, OUTPUT);
+    digitalWrite(MOTOR_EN, HIGH);
+
+    // ---- Servo ----
     steeringServo.attach(SERVO_PWM);
     steeringServo.write(SERVO_CENTER);
     delay(200);
 
-    // ---- BNO086 initialization ----
+    // ---- BNO086 ----
     Wire.begin(IMU_SDA, IMU_SCL);
-    // Try I2C address 0x4B (SparkFun) and fallback to 0x4A (Adafruit)
     if (!bno.begin_I2C(0x4B)) {
         if (!bno.begin_I2C(0x4A)) {
             Serial.println("BNO086 not found at 0x4B or 0x4A");
@@ -149,8 +154,49 @@ void readUltrasonic() {
 void readIMU() {
     sh2_gyroscope_calibrated_t gyro;
     if (bno.getSensorEvent(&gyro)) {
-        imu_yaw_rate = gyro.z;   // rad/s, already in rad/s
+        imu_yaw_rate = gyro.z;   // rad/s
     }
+}
+
+// ============================================================
+// Motor Speed Control – BTS 7960 (Two PWM pins)
+// ============================================================
+
+int mapSpeedToDuty(float speed, float max_speed) {
+    // Clamp speed
+    if (speed > max_speed) speed = max_speed;
+    if (speed < -max_speed) speed = -max_speed;
+    // Map to duty cycle (0-1023)
+    return (int)((speed / max_speed) * MAX_DUTY);
+}
+
+void applyMotorSpeed(float speed_mps) {
+    int duty = mapSpeedToDuty(speed_mps, MAX_SPEED_MPS);
+    // duty is between -MAX_DUTY and +MAX_DUTY
+    if (duty > 0) {
+        // Forward: RPWM = duty, LPWM = 0
+        ledcWrite(0, duty);
+        ledcWrite(1, 0);
+    } else if (duty < 0) {
+        // Reverse: RPWM = 0, LPWM = -duty
+        ledcWrite(0, 0);
+        ledcWrite(1, -duty);
+    } else {
+        // Stop: both 0
+        ledcWrite(0, 0);
+        ledcWrite(1, 0);
+    }
+}
+
+// ============================================================
+// Servo Steering Control
+// ============================================================
+
+void applyServoAngle(float angle_rad) {
+    float clamped = constrain(angle_rad, -MAX_STEER_RAD, MAX_STEER_RAD);
+    int angle_deg = SERVO_CENTER + (int)((clamped / MAX_STEER_RAD) * 90.0);
+    angle_deg = constrain(angle_deg, 0, 180);
+    steeringServo.write(angle_deg);
 }
 
 // ============================================================
@@ -158,7 +204,6 @@ void readIMU() {
 // ============================================================
 
 void sendSensorData() {
-    // Build JSON without checksum first
     String msg = "{";
     msg += "\"type\":\"sensor_data\",";
     msg += "\"data\":{";
@@ -168,7 +213,6 @@ void sendSensorData() {
     msg += "\"imu_yaw_rate\":" + String(imu_yaw_rate, 6);
     msg += "}";
 
-    // Compute simple checksum (sum of ASCII codes)
     int sum = 0;
     for (int i = 0; i < msg.length(); i++) sum += msg[i];
     msg += ",\"checksum\":" + String(sum);
@@ -182,7 +226,6 @@ void sendSensorData() {
 // ============================================================
 
 void processCommand(String json) {
-    // Expected: {"type":"cmd","speed":0.30,"steering":0.15}
     float speed = 0.0, steer = 0.0;
     int idxSpeed = json.indexOf("\"speed\":");
     int idxSteer = json.indexOf("\"steering\":");
@@ -193,7 +236,7 @@ void processCommand(String json) {
         sscanf(json.substring(idxSteer + 11).c_str(), "%f", &steer);
     }
 
-    // Clamp speed and steering (hard limits)
+    // Clamp speed and steering
     if (speed > MAX_SPEED_MPS) speed = MAX_SPEED_MPS;
     if (speed < -MAX_SPEED_MPS) speed = -MAX_SPEED_MPS;
     if (steer > MAX_STEER_RAD) steer = MAX_STEER_RAD;
@@ -202,36 +245,6 @@ void processCommand(String json) {
     target_speed = speed;
     target_steer = steer;
     new_cmd = true;
-}
-
-// ============================================================
-// Motor Speed Control
-// ============================================================
-
-void applyMotorSpeed(float speed_mps) {
-    int duty = (int)((speed_mps / MAX_SPEED_MPS) * MAX_DUTY);
-    if (duty > MAX_DUTY) duty = MAX_DUTY;
-    if (duty < -MAX_DUTY) duty = -MAX_DUTY;
-    if (duty >= 0) {
-        digitalWrite(MOTOR_DIR, HIGH);
-        ledcWrite(0, duty);
-    } else {
-        digitalWrite(MOTOR_DIR, LOW);
-        ledcWrite(0, -duty);
-    }
-}
-
-// ============================================================
-// Servo Steering Control
-// ============================================================
-
-void applyServoAngle(float angle_rad) {
-    // Clamp to mechanical limits
-    float clamped = constrain(angle_rad, -MAX_STEER_RAD, MAX_STEER_RAD);
-    // Map radians to servo pulse (0-180°)
-    int angle_deg = SERVO_CENTER + (int)((clamped / MAX_STEER_RAD) * 90.0);
-    angle_deg = constrain(angle_deg, 0, 180);
-    steeringServo.write(angle_deg);
 }
 
 // ============================================================
