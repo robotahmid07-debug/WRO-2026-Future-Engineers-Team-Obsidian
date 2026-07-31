@@ -41,6 +41,12 @@ class PiPins:
     DIRECTION_SELECT = 23   # Physical pin 16
 
     # ============================================================
+    # Start Button (GPIO 26)
+    # ============================================================
+    # Button pressed (LOW) starts the round
+    START_BUTTON = 26   # Physical pin 37
+
+    # ============================================================
     # USB is used for HuskyLens and RPLIDAR C1 (via USB serial)
     # No additional GPIO needed on Pi for this project.
     # ============================================================
@@ -74,6 +80,13 @@ class ESP32Pins:
     # STEERING SERVO (PWM)
     # ============================================================
     SERVO_PWM = 41    # PWM signal for steering servo
+
+    # ============================================================
+    # BNO086 IMU – I2C Bus
+    # ============================================================
+    # Connected to ESP32-S3 I2C peripheral
+    IMU_SDA = 8
+    IMU_SCL = 9
 
     # ============================================================
     # NOTE: Avoid strapping pins: GPIO0, 3, 45, 46
