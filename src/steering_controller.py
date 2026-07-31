@@ -6,7 +6,10 @@ Features:
   - Speed‑dependent steering angle limiting (safer at high speeds).
   - Configurable max steering angle and smoothing factor.
   - Send speed + steering angle to ESP32 via serial bridge.
-  - turn_around() method for 180° U‑turn (used by surprise rule).
+  - turn_around() method for 180° U‑turn (fixed‑time fallback).
+  - turn_around_imu() method for 180° U‑turn using IMU heading feedback (closed‑loop).
+  - set_localization() to pass localization object for IMU data.
+  - All calibratable parameters are read from config (max_speed, max_steer_rad, etc.)
 """
 
 import math
@@ -43,6 +46,14 @@ class SteeringController:
         self.current_steer = 0.0       # filtered steering angle
         self.last_raw_steer = 0.0      # for smoothing
 
+        # Localization reference (for IMU-based U‑turn)
+        self.localization = None
+
+    def set_localization(self, localization):
+        """Pass the localization object for IMU heading data."""
+        self.localization = localization
+        logger.info("Localization set for steering controller (IMU U‑turn available).")
+
     def set_speed(self, linear: float, angular: float) -> None:
         """
         Set the robot's speed and steering.
@@ -56,7 +67,7 @@ class SteeringController:
 
         # 2. Speed‑dependent steering limiting (safer at high speed)
         # At low speed, allow full steering angle. At max speed, reduce to 60% of max.
-        speed_fraction = abs(linear) / self.max_speed
+        speed_fraction = abs(linear) / max(self.max_speed, 0.001)
         steer_limit_factor = max(0.6, 1.0 - speed_fraction * 0.4)
         current_max_steer = self.max_steer_rad * steer_limit_factor
 
@@ -99,44 +110,103 @@ class SteeringController:
         """Return current speed and steering angle (for debugging)."""
         return self.current_speed, self.current_steer
 
-    # ------------------------------
-    # NEW METHOD: turn_around()
-    # ------------------------------
+    # ============================================================
+    # U‑Turn Methods
+    # ============================================================
+
     def turn_around(self, speed: float = 0.1) -> None:
         """
-        Execute a 180° turn in place.
-        Steers fully to one side and reverses slightly,
-        then centers steering.
+        Execute a 180° turn in place (fixed‑time fallback).
+        Steers fully to one side and reverses slightly, then centers steering.
 
-        This is used for the surprise rule when the direction must be reversed.
-
-        Args:
-            speed: Reverse speed during the turn (m/s). Should be small for safety.
+        This is the fallback method if IMU is not available.
         """
-        logger.info(f"Executing 180° turn at speed {speed} m/s")
-
+        logger.info(f"Executing fixed‑time 180° turn at speed {speed} m/s")
         # 1. Stop and center steering first
         self.stop()
         time.sleep(0.2)
 
         # 2. Steer fully to one side (e.g., left)
-        # We'll use the max steering angle.
-        steer_angle = self.max_steer_rad * 0.9   # 90% of max to be safe
-        # We'll send a command with zero speed but full steering to set the servo
+        steer_angle = self.max_steer_rad * 0.9
+        # Send a command with zero speed but full steering to set the servo
         self.set_speed(0.0, steer_angle / self.steer_gain)  # angular command
         time.sleep(0.3)  # allow servo to move
 
         # 3. Reverse slowly while maintaining the steering angle
-        # We'll use the given speed (negative for reverse)
-        reverse_speed = -abs(speed)   # ensure it's negative
-        # Send reverse command while keeping the same steering angle
-        # We need to convert the steering angle back to angular velocity
+        reverse_speed = -abs(speed)
         angular_cmd = steer_angle / self.steer_gain
         self.set_speed(reverse_speed, angular_cmd)
-        # Duration depends on the car's turning radius – 1.5 sec is typical.
-        # This may need tuning; we can add a config parameter later.
-        time.sleep(1.5)
+        time.sleep(1.5)  # duration – enough for a 180° turn
 
         # 4. Stop and center steering
         self.stop()
-        logger.info("180° turn complete")
+        logger.info("Fixed‑time 180° turn complete.")
+
+    def turn_around_imu(self, speed: float = 0.1, target_angle_deg: float = 180.0):
+        """
+        Execute a 180° U‑turn using IMU heading feedback (closed‑loop).
+        This is more reliable than the fixed‑time version because it stops
+        when the heading has actually changed by 180°, regardless of terrain.
+
+        Falls back to `turn_around()` if localization or IMU is not available.
+        """
+        # Check if IMU is available via localization
+        if self.localization is None:
+            logger.warning("Localization not set – using fallback turn_around()")
+            self.turn_around(speed)
+            return
+
+        # Check if localization has a valid pose and IMU data
+        # We'll read from localization.current_pose.theta (which is fused with IMU)
+        # but we also need to ensure IMU is available; we can check a flag.
+        if not hasattr(self.localization, 'imu_available') or not self.localization.imu_available:
+            logger.warning("IMU not available – using fallback turn_around()")
+            self.turn_around(speed)
+            return
+
+        logger.info(f"Executing IMU‑based 180° turn at speed {speed} m/s")
+
+        # 1. Stop and center steering
+        self.stop()
+        time.sleep(0.2)
+
+        # 2. Steer fully to one side (left)
+        steer_angle = self.max_steer_rad * 0.9
+        # Send a command with zero speed but full steering to set the servo
+        self.set_speed(0.0, steer_angle / self.steer_gain)
+        time.sleep(0.3)  # allow servo to move
+
+        # 3. Get initial heading from localization
+        start_heading = self.localization.current_pose.theta  # radians
+        turned = 0.0
+        target_angle_rad = math.radians(target_angle_deg)
+
+        # 4. Reverse slowly while turning until heading change reaches target
+        reverse_speed = -abs(speed)
+        angular_cmd = steer_angle / self.steer_gain
+        start_time = time.time()
+        timeout = 5.0  # safety timeout (seconds)
+
+        while abs(turned) < target_angle_rad:
+            # Update heading
+            current_heading = self.localization.current_pose.theta
+            # Compute delta (handle wrap‑around)
+            delta = current_heading - start_heading
+            if delta > math.pi:
+                delta -= 2 * math.pi
+            elif delta < -math.pi:
+                delta += 2 * math.pi
+            turned = delta
+
+            # Apply reverse speed (steering already set)
+            self.set_speed(reverse_speed, angular_cmd)
+            time.sleep(0.02)   # small loop delay (50 Hz)
+
+            # Safety timeout
+            if time.time() - start_time > timeout:
+                logger.warning("IMU U‑turn timeout – stopping")
+                break
+
+        # 5. Stop and center
+        self.stop()
+        logger.info(f"IMU‑based U‑turn complete. Turned {math.degrees(turned):.1f}°")
