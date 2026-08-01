@@ -1,0 +1,108 @@
+📡 How to Calibrate and Update Your Raspberry Pi 5 Without Internet
+Yes – you can fully calibrate and update your robot on-site without internet using SSH over a local network.
+
+🔌 Step 1: Connect to Your Raspberry Pi 5
+You need to connect your laptop to the Pi using one of these methods:
+
+Option A: Ethernet Cable (Recommended – Most Stable)
+Plug an Ethernet cable directly between your laptop and the Raspberry Pi 5.
+
+The Pi should automatically get a 169.254.x.x IP address.
+
+If not, you may need to set a static IP on the Pi (you can pre‑configure this before competition).
+
+Option B: USB‑C Cable (If Ethernet Port Is Used)
+The Pi can be configured for SSH over USB‑C.
+
+This also powers the Pi, so you only need one cable.
+
+Pre‑configure this before competition – it's a one‑time setup.
+
+Option C: Wi‑Fi (If Available)
+Connect both devices to the same Wi‑Fi network (if venue provides one).
+
+Find the Pi's IP address.
+
+💻 Step 2: SSH into the Pi
+Once connected, open a terminal on your laptop and run:
+
+bash
+ssh <username>@<pi-ip-address>
+Example:
+
+bash
+ssh pi@169.254.1.1
+Or if using USB‑C:
+
+bash
+ssh pi@raspberrypi.local
+Enter your password when prompted.
+
+📝 Step 3: Edit YAML Files (Calibration)
+Once logged in, navigate to your project folder:
+
+bash
+cd /home/pi/wro_future_engineers_2026/config
+Open the YAML file with nano:
+
+bash
+nano system_prompt_matrix.yaml
+Use arrow keys to navigate.
+
+Edit values as needed.
+
+Save: Ctrl + O → press Enter.
+
+Exit: Ctrl + X.
+
+🔧 Step 4: Edit Python Code (If Needed)
+If you need to update state_machine.py or other files:
+
+bash
+cd /home/pi/wro_future_engineers_2026/src
+nano state_machine.py
+Make your changes, save, and exit.
+
+🚀 Step 5: Restart the Robot Service
+After saving your changes, restart the robot service:
+
+bash
+sudo systemctl restart wro_robot.service
+Check status:
+
+bash
+sudo systemctl status wro_robot.service
+View live logs:
+
+bash
+sudo journalctl -u wro_robot.service -f
+📂 Option: Transfer Files via USB Stick
+If you have updated files on your laptop (e.g., new main.cpp or state_machine.py), you can transfer them via USB:
+
+Copy files to a USB stick.
+
+Plug the USB stick into the Raspberry Pi.
+
+Mount and copy:
+
+bash
+sudo mount /dev/sda1 /mnt
+cp /mnt/new_file.py /home/pi/wro_future_engineers_2026/src/
+sudo umount /mnt
+🧠 Tips for On‑Site Calibration
+Task	Command
+Find Pi's IP	hostname -I
+View logs	sudo journalctl -u wro_robot.service -f
+Restart service	sudo systemctl restart wro_robot.service
+Check service	sudo systemctl status wro_robot.service
+Edit YAML	nano config/system_prompt_matrix.yaml
+Edit Python	nano src/state_machine.py
+Reboot	sudo reboot
+✅ Summary
+Question	Answer
+Can I calibrate without internet?	✅ Yes – use SSH over Ethernet, USB‑C, or Wi‑Fi.
+Can I edit YAML?	✅ Yes – use nano on the Pi.
+Can I update Python code?	✅ Yes – edit files or transfer via USB.
+Do I need internet?	❌ No – all communication is local.
+You are fully prepared for on‑site calibration. No internet required. 🚀
+
