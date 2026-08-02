@@ -4,10 +4,9 @@ Uses 360° LIDAR for precise distance measurements to rear and side walls.
 """
 
 import time
-import math
 import logging
 from enum import Enum
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +37,8 @@ class ParkingController:
         self.target_pose = None
 
         # LIDAR-based parking targets
-        self.rear_wall_target = 0.05  # 5 cm from rear wall
-        self.side_wall_target = 0.10  # 10 cm from side wall
+        self.rear_wall_target = 0.05   # 5 cm from rear wall
+        self.side_wall_target = 0.10   # 10 cm from side wall
         self.alignment_tolerance = 0.02
 
         # PID gains for LIDAR-based alignment
@@ -74,7 +73,6 @@ class ParkingController:
 
         self.stage_elapsed = time.time() - self.stage_start_time
 
-        # Execute current stage
         if self.stage == ParkingStage.APPROACH:
             self._execute_approach()
         elif self.stage == ParkingStage.REVERSE_STEER:
@@ -126,12 +124,10 @@ class ParkingController:
         rear_dist = self._get_rear_distance_from_lidar()
 
         if rear_dist is not None and rear_dist < self.rear_wall_target * 2:
-            # We're close enough to the rear wall
             self._transition_to(ParkingStage.REVERSE_STEER)
             logger.info("Parking: APPROACH complete -> REVERSE_STEER")
             return
 
-        # Drive forward slowly
         self.steering.set_speed(0.10, 0.0)
 
         if self.stage_elapsed > self.stage_durations[ParkingStage.APPROACH]:
@@ -141,18 +137,14 @@ class ParkingController:
         """Stage 2: Reverse with steering into the bay."""
         rear_dist = self._get_rear_distance_from_lidar()
 
-        # If rear wall is close enough, start aligning
         if rear_dist is not None and rear_dist < self.rear_wall_target * 1.5:
             self._transition_to(ParkingStage.ALIGN_CENTER)
             logger.info("Parking: REVERSE_STEER complete -> ALIGN_CENTER")
             return
 
-        # Reverse with steering (turn into the bay)
-        # Use LIDAR to detect if we're too close to side walls
         left_dist = self._get_side_distance_from_lidar('left')
         right_dist = self._get_side_distance_from_lidar('right')
 
-        # Compute steering correction based on side distances
         steer_correction = 0.0
         if left_dist is not None and left_dist < self.side_wall_target:
             steer_correction = -0.3  # steer right
@@ -170,25 +162,20 @@ class ParkingController:
         left_dist = self._get_side_distance_from_lidar('left')
         right_dist = self._get_side_distance_from_lidar('right')
 
-        # Compute errors
         rear_error = (rear_dist - self.rear_wall_target) if rear_dist is not None else 0.0
         left_error = (left_dist - self.side_wall_target) if left_dist is not None else 0.0
         right_error = (right_dist - self.side_wall_target) if right_dist is not None else 0.0
 
-        # Use both sides to determine centering
         side_error = (left_error - right_error) / 2 if (left_dist and right_dist) else 0.0
 
-        # Control
         linear_correction = self.kp_rear * rear_error
         steering_correction = -self.kp_side * side_error
 
-        # Clamp
         linear_correction = max(-0.05, min(0.05, linear_correction))
         steering_correction = max(-0.2, min(0.2, steering_correction))
 
-        # Check if aligned
         if (abs(rear_error) < self.alignment_tolerance and
-            abs(side_error) < self.alignment_tolerance):
+                abs(side_error) < self.alignment_tolerance):
             self._transition_to(ParkingStage.FULL_STOP)
             logger.info("Parking: ALIGN_CENTER complete -> FULL_STOP")
             return
@@ -197,7 +184,6 @@ class ParkingController:
             self._transition_to(ParkingStage.FULL_STOP)
             return
 
-        # Apply corrections (very slow movements)
         self.steering.set_speed(linear_correction, steering_correction)
 
     def _execute_full_stop(self):
