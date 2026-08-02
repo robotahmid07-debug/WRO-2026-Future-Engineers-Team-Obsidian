@@ -5,7 +5,8 @@ Features:
   - Low‑pass filter for smooth servo commands.
   - Speed‑dependent steering angle limiting (safer at high speeds).
   - Configurable max steering angle and smoothing factor.
-  - Send speed + steering angle to ESP32 via serial bridge.
+  - Converts m/s to PWM (-255..255) and radians to servo angle (0..180).
+  - Sends commands with keys "motor" and "steer" to ESP32 (matching its parser).
   - turn_around() method for 180° U‑turn (fixed‑time fallback).
   - turn_around_imu() method for 180° U‑turn using IMU heading feedback (closed‑loop).
   - set_localization() to pass localization object for IMU data.
@@ -41,13 +42,40 @@ class SteeringController:
         self.smoothing_alpha = smoothing_alpha
         self.steer_gain = steer_gain
 
+        # Servo mapping (ESP32 expects 0..180)
+        self.servo_center = 90
+        self.servo_range = 90   # ±90° from center
+
         # Internal state
         self.current_speed = 0.0
-        self.current_steer = 0.0       # filtered steering angle
+        self.current_steer = 0.0       # filtered steering angle (radians)
         self.last_raw_steer = 0.0      # for smoothing
 
         # Localization reference (for IMU-based U‑turn)
         self.localization = None
+
+    def _speed_to_pwm(self, speed_mps: float) -> int:
+        """
+        Convert speed (m/s) to PWM value (-255..255).
+        Negative = reverse.
+        """
+        if abs(speed_mps) < 0.001:
+            return 0
+        pwm = int((speed_mps / self.max_speed) * 255)
+        return max(-255, min(255, pwm))
+
+    def _steering_to_servo(self, steering_rad: float) -> int:
+        """
+        Convert steering angle (radians) to servo angle (0..180).
+        Positive steering = left turn = servo angle > 90.
+        """
+        if abs(steering_rad) < 0.001:
+            return self.servo_center
+        # Normalize to [-1, 1] based on max steering angle
+        ratio = steering_rad / self.max_steer_rad
+        ratio = max(-1.0, min(1.0, ratio))
+        servo_angle = self.servo_center + ratio * self.servo_range
+        return int(round(max(0, min(180, servo_angle))))
 
     def set_localization(self, localization):
         """Pass the localization object for IMU heading data."""
@@ -66,7 +94,6 @@ class SteeringController:
         linear = max(-self.max_speed, min(self.max_speed, linear))
 
         # 2. Speed‑dependent steering limiting (safer at high speed)
-        # At low speed, allow full steering angle. At max speed, reduce to 60% of max.
         speed_fraction = abs(linear) / max(self.max_speed, 0.001)
         steer_limit_factor = max(0.6, 1.0 - speed_fraction * 0.4)
         current_max_steer = self.max_steer_rad * steer_limit_factor
@@ -86,24 +113,23 @@ class SteeringController:
         self.current_speed = linear
         self.current_steer = filtered_steer
 
-        # 7. Send command
-        self._send_command()
+        # 7. Convert to ESP32 format and send
+        motor_pwm = self._speed_to_pwm(linear)
+        servo_angle = self._steering_to_servo(filtered_steer)
 
-    def _send_command(self) -> None:
-        """Send speed and filtered steering angle to ESP32."""
-        msg = {
-            'type': 'cmd',
-            'speed': self.current_speed,
-            'steering': self.current_steer
+        command = {
+            "motor": motor_pwm,
+            "steer": servo_angle
         }
-        self.serial_bridge.send(msg)
+        self.serial_bridge.send(command)
 
     def stop(self) -> None:
         """Emergency stop: set speed to 0 and center steering."""
         self.current_speed = 0.0
         self.current_steer = 0.0
         self.last_raw_steer = 0.0
-        self._send_command()
+        command = {"motor": 0, "steer": self.servo_center}
+        self.serial_bridge.send(command)
         logger.info("Motors stopped, steering centered")
 
     def get_current_state(self):
@@ -157,8 +183,6 @@ class SteeringController:
             return
 
         # Check if localization has a valid pose and IMU data
-        # We'll read from localization.current_pose.theta (which is fused with IMU)
-        # but we also need to ensure IMU is available; we can check a flag.
         if not hasattr(self.localization, 'imu_available') or not self.localization.imu_available:
             logger.warning("IMU not available – using fallback turn_around()")
             self.turn_around(speed)
