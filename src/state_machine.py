@@ -481,7 +481,10 @@ class StateMachine:
                         # Count the corner
                         self.sections_passed += 1
                         self.last_section_time = time.time()
-                        logger.debug(f"Corner detected (deriv={deriv_trigger}, pct={pct_trigger}) -> sections={self.sections_passed}")
+                        logger.debug(
+                            f"Corner detected (deriv={deriv_trigger}, pct={pct_trigger}) "
+                            f"-> sections={self.sections_passed}"
+                        )
 
                 # Store previous distances
                 self.prev_left_dist = left_dist
