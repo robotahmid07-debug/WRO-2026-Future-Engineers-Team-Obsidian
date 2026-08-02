@@ -172,18 +172,19 @@ class WallMapper:
 
         cardinal = self._snap_to_cardinal(robot_theta)
 
-        if cardinal == 0:   # facing +x
-            robot_x = (x_min + x_max - rear + front) / 2.0
-            robot_y = (y_min + y_max - right + left) / 2.0
-        elif cardinal == 1:   # facing +y
-            robot_x = (x_min + x_max + left - right) / 2.0
-            robot_y = (y_min + y_max - rear + front) / 2.0
-        elif cardinal == 2:   # facing -x
+        # Corrected sign arithmetic (verified numerically)
+        if cardinal == 0:      # facing +x
             robot_x = (x_min + x_max - front + rear) / 2.0
             robot_y = (y_min + y_max - left + right) / 2.0
-        else:   # cardinal == 3, facing -y
-            robot_x = (x_min + x_max - left + right) / 2.0
+        elif cardinal == 1:    # facing +y
+            robot_x = (x_min + x_max + left - right) / 2.0
             robot_y = (y_min + y_max - front + rear) / 2.0
+        elif cardinal == 2:    # facing -x
+            robot_x = (x_min + x_max + front - rear) / 2.0
+            robot_y = (y_min + y_max + left - right) / 2.0
+        else:                  # cardinal == 3, facing -y
+            robot_x = (x_min + x_max - left + right) / 2.0
+            robot_y = (y_min + y_max + front - rear) / 2.0
 
         theta_est = robot_theta
 
