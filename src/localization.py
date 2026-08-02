@@ -73,7 +73,10 @@ class Localization:
         self.imu_filter_alpha = 0.3
 
         # Flag indicating whether IMU data has been received at least once
-        self.imu_available = False   # <-- ADDED
+        self.imu_available = False
+
+        # Track the time of the last IMU update to detect staleness
+        self.last_imu_time = 0.0
 
     # ==========================================================
     # IMU Data Update (called from state_machine)
@@ -91,7 +94,8 @@ class Localization:
         else:
             self.imu_filtered = yaw_rate
         self.latest_imu_yaw_rate = self.imu_filtered
-        self.imu_available = True   # <-- ADDED: mark IMU as active
+        self.imu_available = True
+        self.last_imu_time = time.time()
 
     # ==========================================================
     # Pose Registration
@@ -150,13 +154,21 @@ class Localization:
         # Compute kinematic heading rate
         theta_dot_kinematic = (linear_vel / self.wheelbase) * math.tan(steering_angle)
 
-        # ---- Fuse with IMU if available ----
-        if self.latest_imu_yaw_rate is not None:
+        # ---- Fuse with IMU if available and fresh ----
+        use_imu = False
+        if self.latest_imu_yaw_rate is not None and self.imu_available:
+            # Check if IMU data is stale (>1s)
+            if current_time - self.last_imu_time < 1.0:
+                use_imu = True
+
+        if use_imu:
             # Complementary filter: alpha * IMU + (1-alpha) * kinematic
             alpha = self.imu_alpha
             theta_dot = alpha * self.latest_imu_yaw_rate + (1 - alpha) * theta_dot_kinematic
         else:
             theta_dot = theta_dot_kinematic
+            if self.imu_available and current_time - self.last_imu_time > 1.0:
+                logger.debug("IMU data stale, falling back to kinematic")
 
         # Update pose using the fused heading rate
         self.current_pose.theta += theta_dot * dt
@@ -250,3 +262,23 @@ class Localization:
     def clear_map(self) -> None:
         """Convenience method to clear the map (force rebuild)."""
         self.wall_mapper.clear_map()
+
+    # ==========================================================
+    # Reset
+    # ==========================================================
+
+    def reset(self) -> None:
+        """
+        Reset the localization module to initial state.
+        Clears pose, IMU state, wall mapper, and timers.
+        """
+        self.current_pose = Pose2D(0.0, 0.0, 0.0)
+        self.initial_pose = Pose2D(0.0, 0.0, 0.0)
+        self.last_update_time = time.time()
+        self.latest_imu_yaw_rate = None
+        self.imu_available = False
+        self.imu_filtered = 0.0
+        self.last_imu_time = 0.0
+        self.last_lidar_scan = []
+        self.wall_mapper.clear_map()
+        logger.info("Localization reset")
