@@ -196,11 +196,9 @@ class WallMapper:
             logger.warning("No LIDAR scan available; returning (0,0,0)")
             return (0.0, 0.0, 0.0)
 
-        # Extract track bounding box (already stored, but we can recompute)
-        xs = [p[0] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
-        ys = [p[1] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
+        # Use stored bounding box
+        x_min, x_max = self.x_min, self.x_max
+        y_min, y_max = self.y_min, self.y_max
 
         # Get distances to front, left, right, rear walls from LIDAR
         front = None
@@ -255,7 +253,11 @@ class WallMapper:
         # We keep the input theta as the estimate.
         theta_est = theta
 
-        logger.debug(f"Pose from walls (heading-aware): x={x_est:.3f}, y={y_est:.3f}, theta={math.degrees(theta_est):.1f}°")
+        # Split the long debug line to satisfy linting
+        logger.debug(
+            f"Pose from walls: x={x_est:.3f}, y={y_est:.3f}, "
+            f"theta={math.degrees(theta_est):.1f}°"
+        )
         return (x_est, y_est, theta_est)
 
     def save_map(self, filename: str) -> None:
