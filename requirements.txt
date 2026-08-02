@@ -6,12 +6,11 @@
 # Core libraries
 pyyaml>=6.0              # YAML configuration parsing
 pyserial>=3.5            # UART communication with ESP32-S3
-rplidar>=1.0.0           # RPLIDAR C1 driver
-smbus2>=0.4.2            # I2C communication for HuskyLens (if using I2C)
-RPi.GPIO>=0.7.0          # GPIO control for hardware switches and buttons
-
-# Added missing dependencies
-numpy>=1.24              # Numerical arrays (used in wall_mapper)
+rplidar>=0.9             # RPLIDAR C1 driver (latest is 0.9.2)
+smbus2>=0.4.2            # I2C communication
+RPi.GPIO>=0.7.0          # GPIO control (may need mocking on CI)
+numpy>=1.24              # Numerical arrays
+pyhuskylens>=0.1         # HuskyLens V2 Python driver
 
 # Testing & Development
 pytest>=7.0              # Unit testing
