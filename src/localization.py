@@ -191,7 +191,8 @@ class Localization:
 
         # ---- Map correction (if enabled and map ready) ----
         if self.use_map_correction and self.wall_mapper.is_mapped and lidar_points:
-            map_pose = self.wall_mapper.get_pose_from_walls(lidar_points)
+            # Pass current theta for heading‑aware pose correction
+            map_pose = self.wall_mapper.get_pose_from_walls(lidar_points, self.current_pose.theta)
             if map_pose != (0.0, 0.0, 0.0):
                 # Blend odometry with map pose using a weighted average
                 alpha = 0.4   # map weight (tunable)
@@ -238,7 +239,8 @@ class Localization:
             return None
         if not self.last_lidar_scan:
             return None
-        x, y, theta = self.wall_mapper.get_pose_from_walls(self.last_lidar_scan)
+        # Pass current theta for heading‑aware pose correction
+        x, y, theta = self.wall_mapper.get_pose_from_walls(self.last_lidar_scan, self.current_pose.theta)
         if x == 0.0 and y == 0.0 and theta == 0.0:
             return None
         return Pose2D(x, y, theta)
