@@ -18,7 +18,7 @@ Integrates:
   - Direct navigation to parking lot using LIDAR‑based localization.
   - All calibratable parameters read from config.
 """
-
+# trigger
 import time
 import math
 import logging
