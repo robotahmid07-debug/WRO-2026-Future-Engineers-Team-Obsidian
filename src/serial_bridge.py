@@ -1,127 +1,201 @@
 """
-Handles UART communication between Raspberry Pi and ESP32-S3.
-Uses JSON framing with XOR checksum for reliability.
+Serial communication bridge between Raspberry Pi and ESP32‑S3.
+Handles UART with JSON framing and XOR checksum.
+
+Features:
+  - Send commands (motor, steer) to ESP32.
+  - Receive sensor data (ultrasonic, IMU) from ESP32.
+  - Verify XOR checksum using raw payload substring (avoids formatting issues).
+  - Maintains a shared `latest_sensor_data` dictionary for multiple consumers.
 """
 
-import serial
 import json
-import threading
 import time
 import logging
-from queue import Queue, Empty
+import serial
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 
 class SerialBridge:
-    def __init__(self, port: str = '/dev/ttyAMA0', baudrate: int = 460800, timeout: float = 0.01):
+    def __init__(self, port: str = "/dev/ttyS0", baudrate: int = 115200,
+                 timeout: float = 0.1):
+        """
+        Initialize UART connection.
+
+        Args:
+            port: Serial device (e.g., '/dev/ttyS0' or '/dev/ttyUSB0').
+            baudrate: Communication speed (must match ESP32).
+            timeout: Read timeout in seconds.
+        """
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
-        self.ser: Optional[serial.Serial] = None
-        self.rx_queue = Queue(maxsize=100)
-        self.tx_queue = Queue(maxsize=100)
-        self.running = False
-        self.read_thread = None
-        self.write_thread = None
 
-    def open(self):
-        """Open the serial port and start background read/write threads."""
         try:
-            self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-            self.running = True
-            self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
-            self.write_thread = threading.Thread(target=self._write_loop, daemon=True)
-            self.read_thread.start()
-            self.write_thread.start()
-            logger.info(f"Serial bridge opened on {self.port} at {self.baudrate} baud")
+            self.ser = serial.Serial(port, baudrate, timeout=timeout)
+            logger.info(f"SerialBridge opened on {port} at {baudrate} baud")
         except Exception as e:
-            logger.error(f"Failed to open serial port: {e}")
-            raise
+            logger.error(f"Failed to open serial port {port}: {e}")
+            self.ser = None
 
-    def close(self):
-        """Close the serial port and stop background threads."""
-        self.running = False
-        if self.ser and self.ser.is_open:
-            self.ser.close()
-        if self.read_thread:
-            self.read_thread.join(timeout=1.0)
-        if self.write_thread:
-            self.write_thread.join(timeout=1.0)
-        logger.info("Serial bridge closed")
+        # Shared sensor state (latest data from ESP32)
+        self.latest_sensor_data: Optional[Dict[str, Any]] = None
+        self.latest_timestamp: float = 0.0
 
-    def _read_loop(self):
-        """Background thread: continuously read lines from serial and parse JSON."""
-        while self.running and self.ser and self.ser.is_open:
-            try:
-                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                    if self._verify_checksum(msg):
-                        self.rx_queue.put(msg, block=False)
-                    else:
-                        logger.warning("Checksum mismatch, dropping message")
-                except json.JSONDecodeError:
-                    logger.warning("Malformed JSON received")
-            except Exception as e:
-                logger.error(f"Read error: {e}")
-                time.sleep(0.01)
+        # Internal buffer for incomplete lines
+        self._buffer = ""
 
-    def _write_loop(self):
-        """Background thread: send messages from the TX queue."""
-        while self.running and self.ser and self.ser.is_open:
-            try:
-                msg = self.tx_queue.get(timeout=0.1)
-                if msg is None:
-                    continue
-                msg['checksum'] = self._compute_checksum(msg)
-                payload = json.dumps(msg) + '\n'
-                self.ser.write(payload.encode('utf-8'))
-            except Empty:
-                pass
-            except Exception as e:
-                logger.error(f"Write error: {e}")
-
-    @staticmethod
-    def _compute_checksum(msg: Dict[str, Any]) -> int:
+    def _verify_checksum(self, raw_bytes: bytes) -> bool:
         """
-        Compute XOR checksum over the message content (excluding 'checksum' key).
-        Matches the ESP32 firmware implementation.
+        Verify XOR checksum without reconstructing JSON.
+
+        Extracts the payload before ',"checksum":' and compares its XOR
+        with the sent checksum. This avoids float formatting differences
+        between Python and Arduino (e.g., '129.00' vs '129.0').
+
+        Returns:
+            True if checksum matches, False otherwise.
         """
-        data = {k: v for k, v in msg.items() if k != 'checksum'}
-        json_str = json.dumps(data, sort_keys=True, separators=(',', ':'))
-        checksum = 0
-        for char in json_str:
-            checksum ^= ord(char)
-        return checksum
-
-    @staticmethod
-    def _verify_checksum(msg: Dict[str, Any]) -> bool:
-        """Verify that the message's checksum matches the computed value."""
-        if 'checksum' not in msg:
-            return False
-        expected = msg.pop('checksum')
-        computed = SerialBridge._compute_checksum(msg)
-        msg['checksum'] = expected
-        return computed == expected
-
-    def send(self, msg: Dict[str, Any]) -> None:
-        """Send a JSON message to the ESP32 (non‑blocking)."""
-        self.tx_queue.put(msg)
-
-    def receive(self, block: bool = True, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
-        """Receive a JSON message from the ESP32 (non‑blocking by default)."""
         try:
-            return self.rx_queue.get(block=block, timeout=timeout)
-        except Empty:
+            # Locate the start of the checksum field
+            idx = raw_bytes.find(b',"checksum":')
+            if idx == -1:
+                logger.debug("Checksum field not found")
+                return False
+
+            # Payload is everything before that marker
+            payload = raw_bytes[:idx]
+
+            # Compute XOR of payload
+            computed = 0
+            for b in payload:
+                computed ^= b
+
+            # Extract the sent checksum (digits after the colon)
+            start = idx + len(b',"checksum":')
+            end = start
+            while end < len(raw_bytes) and raw_bytes[end] in b'0123456789':
+                end += 1
+
+            if start == end:
+                logger.debug("No checksum digits found")
+                return False
+
+            sent_checksum = int(raw_bytes[start:end])
+            return computed == sent_checksum
+
+        except Exception as e:
+            logger.debug(f"Checksum verification failed: {e}")
+            return False
+
+    def _read_line(self) -> Optional[bytes]:
+        """Read one complete line (terminated with '\\n') from serial."""
+        if self.ser is None or not self.ser.is_open:
             return None
 
-    def get_ultrasonic_data(self) -> Optional[Dict[str, float]]:
-        """Convenience: return latest sensor data (distances + IMU)."""
-        msg = self.receive(block=False)
-        if msg and msg.get('type') == 'sensor_data':
-            return msg.get('data', {})
-        return None
+        try:
+            # Read until newline or timeout
+            line = self.ser.readline()
+            if line and line.endswith(b'\n'):
+                return line.strip()
+            return None
+        except Exception as e:
+            logger.error(f"Serial read error: {e}")
+            return None
+
+    def receive(self, block: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Read and parse one message from ESP32.
+
+        Args:
+            block: If True, wait indefinitely for a message (not recommended).
+
+        Returns:
+            Parsed JSON dictionary if valid, or None if no message/error.
+        """
+        raw = self._read_line()
+        if raw is None:
+            return None
+
+        # Verify checksum before parsing
+        if not self._verify_checksum(raw):
+            logger.warning("Checksum mismatch, discarding message")
+            return None
+
+        # Parse JSON
+        try:
+            # Convert bytes to string, remove checksum field to avoid parsing conflicts
+            # We'll find the actual JSON object by stripping the checksum part
+            msg_str = raw.decode('utf-8', errors='ignore')
+            # Remove the checksum field to parse cleanly
+            # Find the start of checksum field and cut it
+            idx = msg_str.find(',"checksum":')
+            if idx != -1:
+                # Find the closing brace or newline
+                end = msg_str.find('}', idx)
+                if end != -1:
+                    # Remove everything from ', "checksum":...' to the end
+                    clean = msg_str[:idx] + msg_str[end:]
+                else:
+                    clean = msg_str[:idx]
+            else:
+                clean = msg_str
+
+            # Now parse JSON
+            data = json.loads(clean)
+            logger.debug(f"Received: {data}")
+
+            # Update shared sensor state if it's sensor data
+            if data.get('type') == 'sensor_data' and 'data' in data:
+                self.latest_sensor_data = data['data']
+                self.latest_timestamp = time.time()
+
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error: {e} | Raw: {raw[:100]}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in receive: {e}")
+            return None
+
+    def send(self, command: Dict[str, Any]) -> bool:
+        """
+        Send a JSON command to ESP32 (e.g., {"motor": 150, "steer": 45}).
+
+        Returns:
+            True if sent successfully, False otherwise.
+        """
+        if self.ser is None or not self.ser.is_open:
+            logger.error("Serial port not open")
+            return False
+
+        try:
+            json_str = json.dumps(command) + "\n"
+            written = self.ser.write(json_str.encode())
+            if written == len(json_str):
+                logger.debug(f"Sent: {json_str.strip()}")
+                return True
+            else:
+                logger.error(f"Write incomplete: {written}/{len(json_str)}")
+                return False
+        except Exception as e:
+            logger.error(f"Send error: {e}")
+            return False
+
+    def get_latest_sensor_data(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the most recent sensor data without reading from serial.
+
+        This allows multiple consumers (e.g., state_machine, emergency_shield)
+        to access the same data without interfering with each other.
+        """
+        return self.latest_sensor_data
+
+    def close(self):
+        """Close the serial connection."""
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            logger.info("SerialBridge closed")
