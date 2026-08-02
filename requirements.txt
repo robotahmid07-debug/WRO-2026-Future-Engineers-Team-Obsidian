@@ -10,8 +10,9 @@ rplidar>=1.0.0           # RPLIDAR C1 driver
 smbus2>=0.4.2            # I2C communication for HuskyLens (if using I2C)
 RPi.GPIO>=0.7.0          # GPIO control for hardware switches and buttons
 
+# Added missing dependencies
+numpy>=1.24              # Numerical arrays (used in wall_mapper)
+
 # Testing & Development
 pytest>=7.0              # Unit testing
 flake8>=6.0              # Code linting (CI)
-pyyaml
-pytest
