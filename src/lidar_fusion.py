@@ -5,11 +5,9 @@ Adds 3‑sample median filtering to eliminate laser dropouts.
 Provides front distance extraction for curvature estimation.
 """
 
-import math
 import threading
-import time
 import logging
-from typing import Optional, Tuple, Dict, List
+from typing import Dict, List, Optional, Tuple
 from collections import deque
 
 from rplidar import RPLidar
