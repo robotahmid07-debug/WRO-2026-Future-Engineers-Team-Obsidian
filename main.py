@@ -16,22 +16,22 @@ import logging
 from pathlib import Path
 
 # GPIO for mode selection and start button
-import RPi.GPIO as GPIO
+import RPi.GPIO as GPIO  # noqa: E402
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from src.config_parser import load_config
-from src.hardware_pins import PiPins
-from src.serial_bridge import SerialBridge
-from src.vision_tracker import HuskyLensReader
-from src.lidar_fusion import LidarFusion
-from src.spatial_map import SpatialMap
-from src.emergency_shield import EmergencyShield
-from src.localization import Localization
-from src.steering_controller import SteeringController
-from src.parking_controller import ParkingController
-from src.state_machine import StateMachine
+from src.config_parser import load_config  # noqa: E402
+from src.hardware_pins import PiPins  # noqa: E402
+from src.serial_bridge import SerialBridge  # noqa: E402
+from src.vision_tracker import HuskyLensReader  # noqa: E402
+from src.lidar_fusion import LidarFusion  # noqa: E402
+from src.spatial_map import SpatialMap  # noqa: E402
+from src.emergency_shield import EmergencyShield  # noqa: E402
+from src.localization import Localization  # noqa: E402
+from src.steering_controller import SteeringController  # noqa: E402
+from src.parking_controller import ParkingController  # noqa: E402
+from src.state_machine import StateMachine  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -211,7 +211,6 @@ def main():
     last_time = time.time()
     logger.info("Starting main control loop at %.1f Hz", rate)
 
-    global running
     while running:
         try:
             fsm.run()
