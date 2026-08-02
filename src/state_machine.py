@@ -696,5 +696,3 @@ class StateMachine:
         if hasattr(self.parking, 'reset'):
             self.parking.reset()
         logger.info("State machine reset to INIT")
-
-  
