@@ -19,7 +19,7 @@ Integrates:
   - All calibratable parameters read from config.
 """
 
-import time
+
 import math
 import logging
 from enum import Enum
