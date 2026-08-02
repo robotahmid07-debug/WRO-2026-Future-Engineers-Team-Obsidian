@@ -11,9 +11,6 @@ import yaml
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
-# ============================================================
-# Existing Dataclasses (unchanged)
-# ============================================================
 
 @dataclass
 class ChallengeConfig:
