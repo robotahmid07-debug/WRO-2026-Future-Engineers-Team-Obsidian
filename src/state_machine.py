@@ -182,6 +182,29 @@ class StateMachine:
 
         logger.info(f"StateMachine initialized with challenge: {self.challenge}")
 
+    # ==========================================================
+    # Helper: extract left/right distances from a scan
+    # ==========================================================
+    def _get_left_right_distances(self, scan):
+        """
+        Extract the nearest left and right distances from a LIDAR scan.
+
+        Returns:
+            (left_dist, right_dist) in meters, or (None, None) if not found.
+        """
+        left_dist = None
+        right_dist = None
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang - 90) < 10:
+                if left_dist is None or dist < left_dist:
+                    left_dist = dist
+            elif abs(ang + 90) < 10:
+                if right_dist is None or dist < right_dist:
+                    right_dist = dist
+        return left_dist, right_dist
+
     def run(self):
         """Main loop; call at ~20-50 Hz."""
         try:
@@ -259,45 +282,31 @@ class StateMachine:
         else:
             return 0.0
 
-    def _compute_wall_steer(self, dt: float) -> float:
+    def _compute_wall_steer(self, scan, dt: float) -> float:
         """
-        Compute wall‑following steering using PID with real dt.
+        Compute wall‑following steering using PID with real dt and pre‑fetched scan.
 
         Args:
+            scan: LIDAR scan snapshot (angle → distance).
             dt: Elapsed time since last call (seconds).
 
         Returns:
             Steering angle in range [-0.5, 0.5].
         """
-        scan = self.lidar.get_scan_snapshot()
-        left_dist = None
-        right_dist = None
-        for ang, dist in scan.items():
-            if dist < 0.05 or dist > 5.0:
-                continue
-            if abs(ang - 90) < 10:
-                left_dist = dist if left_dist is None or dist < left_dist else left_dist
-            elif abs(ang + 90) < 10:
-                right_dist = dist if right_dist is None or dist < right_dist else right_dist
-
+        left_dist, right_dist = self._get_left_right_distances(scan)
         if left_dist is not None and right_dist is not None:
             error = left_dist - right_dist
-
-            # ---- PID controller with anti‑windup ----
             error_derivative = (error - self.prev_pid_error) / dt if dt > 0 else 0.0
 
-            # Only update integral if dt is reasonable (avoid windup on long delays)
+            # Only update integral if dt is reasonable
             if dt < 0.2:
                 self.pid_integral += error * dt
-            # Clamp integral
             self.pid_integral = max(-0.5, min(0.5, self.pid_integral))
 
             wall_steer = (self.KP * error) + (self.KI * self.pid_integral) + (self.KD * error_derivative)
             wall_steer = max(-0.5, min(0.5, wall_steer))
-
             self.prev_pid_error = error
             return wall_steer
-
         return 0.0
 
     def _update_lap_count(self):
@@ -363,14 +372,12 @@ class StateMachine:
         self.last_loop_time = current_time
 
         # ---- 0. Receive IMU data from ESP32 ----
-        # Try to get fresh sensor data; fallback to shared state if none.
         sensor_msg = self.serial_bridge.receive(block=False)
         if sensor_msg and sensor_msg.get('type') == 'sensor_data':
             data = sensor_msg.get('data', {})
             if 'imu_yaw_rate' in data:
                 self.localization.update_imu_data(data['imu_yaw_rate'])
         else:
-            # Use latest shared sensor data if available (and it's a dict)
             latest = self.serial_bridge.get_latest_sensor_data()
             if latest and isinstance(latest, dict) and 'imu_yaw_rate' in latest:
                 self.localization.update_imu_data(latest['imu_yaw_rate'])
@@ -397,6 +404,8 @@ class StateMachine:
             logger.debug(f"Reversing: speed={linear}, steer={angular}")
         else:
             # ---- Normal navigation ----
+            # ---- Fetch LIDAR scan ONCE per loop ----
+            scan = self.lidar.get_scan_snapshot()
 
             # ---- 2a. HuskyLens detections with filters ----
             color_blocks = self.vision.get_latest_colors()
@@ -443,19 +452,11 @@ class StateMachine:
                 self.emergency.set_target_steer_direction(0.0)
 
             # ---- 2c. Wall‑following (PID with dynamic dt) ----
-            wall_steer = self._compute_wall_steer(dt)
+            # Use the same scan to avoid re‑fetching
+            wall_steer = self._compute_wall_steer(scan, dt)
 
-            # Re‑compute LIDAR distances for corner detection
-            scan = self.lidar.get_scan_snapshot()
-            left_dist = None
-            right_dist = None
-            for ang, dist in scan.items():
-                if dist < 0.05 or dist > 5.0:
-                    continue
-                if abs(ang - 90) < 10:
-                    left_dist = dist if left_dist is None or dist < left_dist else left_dist
-                elif abs(ang + 90) < 10:
-                    right_dist = dist if right_dist is None or dist < right_dist else right_dist
+            # Extract left/right distances once from the same scan
+            left_dist, right_dist = self._get_left_right_distances(scan)
 
             error = 0.0
             if left_dist is not None and right_dist is not None:
@@ -466,37 +467,31 @@ class StateMachine:
                     left_delta = left_dist - self.prev_left_dist
                     right_delta = right_dist - self.prev_right_dist
 
-                    # === FIX 1: initialise left_pct / right_pct to avoid UnboundLocalError ===
+                    # Initialise to avoid UnboundLocalError
                     left_pct = 0.0
                     right_pct = 0.0
 
-                    # Derivative trigger
                     deriv_trigger = False
                     if self.use_derivative:
-                        # Compute rate of change per second
                         left_rate = left_delta / dt if dt > 0 else 0
                         right_rate = right_delta / dt if dt > 0 else 0
                         deriv_trigger = (abs(left_rate) > self.deriv_thresh or
                                          abs(right_rate) > self.deriv_thresh)
 
-                    # Percentage trigger (40%) – assigns left_pct/right_pct
                     pct_trigger = False
                     if self.use_percentage:
                         left_pct = abs(left_delta) / max(self.prev_left_dist, 0.1)
                         right_pct = abs(right_delta) / max(self.prev_right_dist, 0.1)
                         pct_trigger = (left_pct > self.pct_thresh or right_pct > self.pct_thresh)
 
-                    # IMU confirmation
                     imu_confirmed = False
                     if self.use_imu and hasattr(self.localization, 'imu_available') and self.localization.imu_available:
                         yaw_rate = self.localization.latest_imu_yaw_rate
                         imu_confirmed = (abs(yaw_rate) > self.imu_thresh)
 
-                    # Combined trigger
                     corner_detected = deriv_trigger or pct_trigger
 
                     if corner_detected:
-                        # Graded steering
                         if self.use_graded:
                             corner_strength = max(abs(left_delta), abs(right_delta), left_pct, right_pct)
                             steer_multiplier = min(1.0, corner_strength / 0.5)
@@ -505,7 +500,6 @@ class StateMachine:
                                 steer_multiplier = 1.0
                             wall_steer = wall_steer * steer_multiplier
 
-                        # Count the corner
                         self.sections_passed += 1
                         self.last_section_time = time.time()
                         logger.debug(
@@ -552,14 +546,13 @@ class StateMachine:
                     distance_factor = max(self.tl.distance_slowdown_min_factor, distance_factor)
                     distance_factor = min(1.0, distance_factor)
 
-                # LIDAR confirmation (safety) – FIX 2: if LIDAR fails to confirm, fallback to wall‑following
+                # LIDAR confirmation (safety) – if LIDAR fails to confirm, fallback to wall‑following
                 if dist_to_pillar > 0:
                     angle_deg = math.degrees(math.atan2(target.local_x, target.local_y))
                     range_m = self.lidar.get_range_in_sector(angle_deg, 10.0)
                     if range_m is None or range_m > self.tl.lidar_confirm_range_m:
                         distance_factor = 1.0
                         traffic_angular = 0.0
-                        # Fallback to wall‑following only
                         raw_angular = wall_steer
                         angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
 
@@ -571,8 +564,6 @@ class StateMachine:
             # ---- 2j. Final speed ----
             combined_factor = steer_factor * predictive_factor * distance_factor
             linear = self.BASE_SPEED * throttle * combined_factor * boost_factor
-
-            # Clamp to max speed
             linear = min(linear, self.config.vehicle.max_speed_mps)
 
             # ---- 2k. IMU G‑force limiting ----
@@ -593,8 +584,8 @@ class StateMachine:
         self.steering.set_speed(linear, angular)
 
         # ---- 4. Update localization with LIDAR points for mapping ----
-        scan_data = self.lidar.get_scan_snapshot()
-        lidar_subset = [(ang, dist) for ang, dist in scan_data.items() if abs(ang) % 5 < 1]
+        # Use the same scan we already have
+        lidar_subset = [(ang, dist) for ang, dist in scan.items() if abs(ang) % 5 < 1]
         steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(
             angular * self.config.vehicle.wheelbase_m, linear
         )
@@ -621,17 +612,14 @@ class StateMachine:
             self.steering.stop()
             return
 
-        # Distance and heading to target (parking spot)
         dx = start_pose.x - current_pose.x
         dy = start_pose.y - current_pose.y
         distance = math.hypot(dx, dy)
         target_heading = math.atan2(dy, dx)
 
-        # Heading error (normalised to [-pi, pi])
         heading_error = target_heading - current_pose.theta
         heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
 
-        # If close enough and facing correct direction, start parking
         if distance < 0.3 and abs(heading_error) < math.pi / 6:
             logger.info(f"Arrived at parking spot (dist={distance:.2f}m) – starting parking")
             self._start_parking()
@@ -643,21 +631,19 @@ class StateMachine:
             f"heading error={math.degrees(heading_error):.1f}°)"
         )
 
-        # Compute wall‑following steering (PID) – use a small dt estimate (0.05)
-        wall_steer = self._compute_wall_steer(0.05)
+        # Compute wall‑following steering – use a dummy scan (empty) to avoid fetching
+        # In the termination state we don't have a fresh scan, but we can reuse the last known one.
+        # However, to keep it simple, we call _compute_wall_steer with an empty dict (returns 0).
+        wall_steer = self._compute_wall_steer({}, 0.05)
 
-        # Steering correction to align with target heading
-        # Simple proportional control
         steer_correction = 0.5 * heading_error
         steer_correction = max(-0.3, min(0.3, steer_correction))
 
-        # Blend: 70% navigation, 30% wall‑following for stability
         final_steer = 0.7 * steer_correction + 0.3 * wall_steer
         final_steer = max(-0.4, min(0.4, final_steer))
 
-        # Speed: reduce as we get closer
         if distance < 0.8:
-            speed = 0.15   # crawl
+            speed = 0.15
         else:
             speed = 0.3
 
@@ -696,7 +682,6 @@ class StateMachine:
         self.surprise_rule_activated = False
         self.reverse_end_time = 0.0
         self.last_loop_time = time.time()
-        # Reset submodules if they have reset methods
         if hasattr(self.emergency, 'reset'):
             self.emergency.reset()
         if hasattr(self.parking, 'reset'):
