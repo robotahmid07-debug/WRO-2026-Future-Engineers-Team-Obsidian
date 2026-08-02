@@ -1,8 +1,15 @@
-pyyaml>=6.0
-pyserial>=3.5
-rplidar>=1.0.0
-smbus2>=0.4.2
-bno055>=1.0.1
-pyhuskylens>=0.1.0   
-pytest>=7.0
-flake8>=6.0
+# ============================================================
+# WRO Future Engineers 2026 – Python Dependencies
+# ============================================================
+# Install with: pip install -r requirements.txt
+
+# Core libraries
+pyyaml>=6.0              # YAML configuration parsing
+pyserial>=3.5            # UART communication with ESP32-S3
+rplidar>=1.0.0           # RPLIDAR C1 driver
+smbus2>=0.4.2            # I2C communication for HuskyLens (if using I2C)
+RPi.GPIO>=0.7.0          # GPIO control for hardware switches and buttons
+
+# Testing & Development
+pytest>=7.0              # Unit testing
+flake8>=6.0              # Code linting (CI)
