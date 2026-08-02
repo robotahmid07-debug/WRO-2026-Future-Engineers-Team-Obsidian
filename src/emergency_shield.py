@@ -91,10 +91,11 @@ class EmergencyShield:
         else:
             logger.info("Emergency shield: NORMAL MODE")
 
+    # ---- Updated `update()` method: expects `"sensor_data"` ----
     def update(self) -> Dict[str, float]:
-        """Poll serial bridge for latest ultrasonic data."""
+        """Poll serial bridge for latest sensor data."""
         msg = self.serial_bridge.receive(block=False)
-        if msg and msg.get('type') == 'ultrasonic':
+        if msg and msg.get('type') == 'sensor_data':   # <-- FIXED: was 'ultrasonic'
             data = msg.get('data', {})
             self.latest_distances['front'] = data.get('front', float('inf'))
             self.latest_distances['front_left'] = data.get('front_left', float('inf'))
