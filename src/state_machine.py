@@ -4,7 +4,7 @@ Supports both Open and Obstacle challenges.
 
 Integrates:
   - Challenge‑specific parameters (Open / Obstacle) from YAML.
-  - PID wall‑following controller (KP, KI, KD) with LazyGo defaults.
+  - PID wall‑following controller (KP, KI, KD).
   - Derivative + Percentage corner detection (dual validation).
   - Graded steering (partial → full steering based on corner strength).
   - Predictive speed control based on error derivative and absolute error.
