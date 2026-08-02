@@ -295,7 +295,7 @@ def test_emergency_brake_override(mock_dependencies):
 def test_surprise_rule_trigger(mock_dependencies):
     """Test that surprise rule is triggered at the configured lap."""
     fsm = StateMachine(**mock_dependencies)
-    fsm.lap_count = 2
+    fsm.lap_count = 1
     fsm.surprise_rule_activated = False
     fsm.last_traffic_light_color = 1  # RED
 
