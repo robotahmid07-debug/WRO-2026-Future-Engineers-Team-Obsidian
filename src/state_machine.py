@@ -480,10 +480,7 @@ class StateMachine:
                         # Count the corner
                         self.sections_passed += 1
                         self.last_section_time = time.time()
-                        logger.debug(
-                            f"Corner detected (deriv={deriv_trigger}, pct={pct_trigger}) "
-                            f"-> sections={self.sections_passed}"
-                        )
+                        logger.debug(f"Corner detected (deriv={deriv_trigger}, pct={pct_trigger}) -> sections={self.sections_passed}")
 
                 # Store previous distances
                 self.prev_left_dist = left_dist
@@ -609,10 +606,7 @@ class StateMachine:
             return
 
         # ---- Drive toward parking spot ----
-        logger.info(
-            f"Driving to parking spot (dist={distance:.2f}m, "
-            f"heading error={math.degrees(heading_error):.1f}°)"
-        )
+        logger.info(f"Driving to parking spot (dist={distance:.2f}m, heading error={math.degrees(heading_error):.1f}°)")
 
         # Compute wall‑following steering (PID)
         wall_steer = self._compute_wall_steer()
