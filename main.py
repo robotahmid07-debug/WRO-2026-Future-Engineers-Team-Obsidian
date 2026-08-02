@@ -89,7 +89,7 @@ def main():
     # ------------------------------------------------------------------
     # Serial bridge (Pi <-> ESP32)
     serial_bridge = SerialBridge(port='/dev/ttyAMA0', baudrate=460800)
-    serial_bridge.open()
+    # serial_bridge.open()   # <-- REMOVED: port already opened in __init__
     logger.info("Serial bridge opened")
 
     # HuskyLens V2 on I2C bus 1
