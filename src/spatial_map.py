@@ -15,7 +15,7 @@ import time
 import math
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple
+from typing import List, Tuple
 from collections import deque
 import threading
 
@@ -137,10 +137,6 @@ class SpatialMap:
 
             # ---- 6. Optional: remove objects with low confidence after long time ----
             # Already handled by the loss tolerance above.
-
-            # Debug logging (optional, can be enabled for tuning)
-            # if len(self.objects) > 0:
-            #     logger.debug(f"SpatialMap: {len(self.objects)} objects active")
 
     def get_confirmed_objects(self) -> List[TrackedObject]:
         """
