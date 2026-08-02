@@ -3,9 +3,10 @@ Unit tests for the State Machine.
 Mocks hardware dependencies to test logic in isolation.
 """
 
+import time
+from unittest.mock import Mock
+
 import pytest
-import math
-from unittest.mock import Mock, patch
 
 from src.config_parser import (
     SystemConfig, ZoneManagement, ChallengeConfig, SensorFusionTracking,
@@ -39,14 +40,28 @@ def mock_config():
             )
         ),
         sensor_fusion_and_tracking=SensorFusionTracking(
-            huskylens_camera={"role": "RAW_BOUNDING_BOX_DETECTOR", "outputs": ["COLOR_ID", "CENTROID_X", "CENTROID_Y", "WIDTH", "HEIGHT"], "horizontal_fov_deg": 60.0},
+            huskylens_camera={
+                "role": "RAW_BOUNDING_BOX_DETECTOR",
+                "outputs": ["COLOR_ID", "CENTROID_X", "CENTROID_Y", "WIDTH", "HEIGHT"],
+                "horizontal_fov_deg": 60.0
+            },
             lidar_2d={"scan_arc_deg": 90.0, "update_rate_hz": 10},
             host_spatial_tracker={
                 "processor_location": "MAIN_ONBOARD_COMPUTER",
-                "coordinate_transformation": {"method": "FUSE_CAMERA_ANGLE_WITH_LIDAR_DISTANCE", "formula": ""},
+                "coordinate_transformation": {
+                    "method": "FUSE_CAMERA_ANGLE_WITH_LIDAR_DISTANCE",
+                    "formula": ""
+                },
                 "spatial_gating": {"tolerance_radius_m": 0.20},
-                "debouncing_and_persistence": {"confirmation_threshold_frames": 3, "frame_loss_tolerance_sec": 1.5, "prune_condition": "Y_LOCAL < 0.0"},
-                "passing_priority_queue": {"sorting_rule": "SORT_BY_ASCENDING_FORWARD_DISTANCE", "active_target": "QUEUE_INDEX_0"}
+                "debouncing_and_persistence": {
+                    "confirmation_threshold_frames": 3,
+                    "frame_loss_tolerance_sec": 1.5,
+                    "prune_condition": "Y_LOCAL < 0.0"
+                },
+                "passing_priority_queue": {
+                    "sorting_rule": "SORT_BY_ASCENDING_FORWARD_DISTANCE",
+                    "active_target": "QUEUE_INDEX_0"
+                }
             }
         ),
         ultrasonic_emergency_shield=UltrasonicShield(
@@ -55,9 +70,22 @@ def mock_config():
             enable_rear_check=True,
             enable_hard_shield=True,
             enable_hard_steer=True,
-            thresholds_cm={"front_stop": 12.0, "front_left_safety": 18.0, "front_right_safety": 18.0, "critical_stop": 8.0, "hard_shield_cm": 5.0},
-            dynamic_throttle={"enable_speed_dampening": True, "dampened_speed_factor": 0.60},
-            reverse_params={"speed_mps": -0.10, "duration_s": 1.0, "rear_clearance_threshold_m": 0.15}
+            thresholds_cm={
+                "front_stop": 12.0,
+                "front_left_safety": 18.0,
+                "front_right_safety": 18.0,
+                "critical_stop": 8.0,
+                "hard_shield_cm": 5.0
+            },
+            dynamic_throttle={
+                "enable_speed_dampening": True,
+                "dampened_speed_factor": 0.60
+            },
+            reverse_params={
+                "speed_mps": -0.10,
+                "duration_s": 1.0,
+                "rear_clearance_threshold_m": 0.15
+            }
         ),
         traffic_light_passing_rules=TrafficLightRules(
             RED_BLOCK_PASS_SIDE="RIGHT",
@@ -113,9 +141,13 @@ def mock_config():
                 predictive_slowdown_gain=0.3,
                 pid=PIDParams(kp=25.0, ki=0.1, kd=8.0),
                 corner_detection=CornerDetectionParams(
-                    use_derivative=True, use_percentage=True, use_graded_steering=True,
-                    use_imu_confirmation=True, lidar_derivative_threshold=0.3,
-                    pct_threshold=0.4, imu_confirm_threshold_radps=0.3
+                    use_derivative=True,
+                    use_percentage=True,
+                    use_graded_steering=True,
+                    use_imu_confirmation=True,
+                    lidar_derivative_threshold=0.3,
+                    pct_threshold=0.4,
+                    imu_confirm_threshold_radps=0.3
                 ),
                 g_force=GForceParams(max_safe_g=0.30, filter_alpha=0.3)
             ),
@@ -128,9 +160,13 @@ def mock_config():
                 predictive_slowdown_gain=0.4,
                 pid=PIDParams(kp=25.0, ki=0.1, kd=8.0),
                 corner_detection=CornerDetectionParams(
-                    use_derivative=True, use_percentage=True, use_graded_steering=True,
-                    use_imu_confirmation=True, lidar_derivative_threshold=0.25,
-                    pct_threshold=0.4, imu_confirm_threshold_radps=0.3
+                    use_derivative=True,
+                    use_percentage=True,
+                    use_graded_steering=True,
+                    use_imu_confirmation=True,
+                    lidar_derivative_threshold=0.25,
+                    pct_threshold=0.4,
+                    imu_confirm_threshold_radps=0.3
                 ),
                 g_force=GForceParams(max_safe_g=0.28, filter_alpha=0.3),
                 traffic_light=TrafficLightParams(
@@ -145,8 +181,17 @@ def mock_config():
             emergency_shield=ParkingEmergencyShield(
                 enabled=True,
                 use_parking_thresholds=True,
-                thresholds_cm={"front_stop": 8.0, "front_left_safety": 10.0, "front_right_safety": 10.0, "critical_stop": 4.0, "hard_shield_cm": 3.0},
-                dynamic_throttle={"enable_speed_dampening": True, "dampened_speed_factor": 0.60},
+                thresholds_cm={
+                    "front_stop": 8.0,
+                    "front_left_safety": 10.0,
+                    "front_right_safety": 10.0,
+                    "critical_stop": 4.0,
+                    "hard_shield_cm": 3.0
+                },
+                dynamic_throttle={
+                    "enable_speed_dampening": True,
+                    "dampened_speed_factor": 0.60
+                },
                 disable_reverse=False,
                 disable_hard_steer=False,
                 disable_hard_shield=False
@@ -168,7 +213,11 @@ def mock_dependencies(mock_config):
     spatial_map = Mock()
     spatial_map.get_confirmed_objects.return_value = []
     emergency_shield = Mock()
-    emergency_shield.get_emergency_actions.return_value = {'brake': False, 'steer_offset': 0.0, 'throttle_factor': 1.0}
+    emergency_shield.get_emergency_actions.return_value = {
+        'brake': False,
+        'steer_offset': 0.0,
+        'throttle_factor': 1.0
+    }
     steering = Mock()
     steering.wheelbase = 0.25
     parking = Mock()
@@ -216,7 +265,6 @@ def test_lap_counting_increment(mock_dependencies):
     """Test that lap count increments when sections_passed reaches 8."""
     fsm = StateMachine(**mock_dependencies)
 
-    # Mock pose to simulate movement
     pose_mock = Mock()
     pose_mock.x = 0.0
     mock_dependencies['localization'].get_pose.return_value = pose_mock
@@ -231,7 +279,7 @@ def test_lap_counting_increment(mock_dependencies):
 
 
 def test_emergency_brake_override(mock_dependencies):
-    """Test that emergency brake stops the robot and sets state to EMERGENCY_STOP."""
+    """Test that emergency brake stops the robot."""
     fsm = StateMachine(**mock_dependencies)
 
     mock_dependencies['emergency_shield'].get_emergency_actions.return_value = {
@@ -252,11 +300,9 @@ def test_surprise_rule_trigger(mock_dependencies):
     fsm.surprise_rule_activated = False
     fsm.last_traffic_light_color = 1  # RED
 
-    # Force lap completion to trigger surprise rule
     fsm.sections_passed = 8
     fsm._update_lap_count()
 
-    # Surprise rule should be activated
     assert fsm.surprise_rule_activated is True
 
 
