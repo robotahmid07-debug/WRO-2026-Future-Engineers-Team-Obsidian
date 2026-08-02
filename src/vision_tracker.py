@@ -8,7 +8,7 @@ import threading
 import logging
 from queue import Queue, Empty
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 # Official pyhuskylens library for HuskyLens V2
 from pyhuskylens import HuskyLens, ALGORITHM_COLOR_RECOGNITION
@@ -51,7 +51,7 @@ class HuskyLensReader:
         self.color_queue = Queue(maxsize=100)
 
         # Colour name mapping (learned colours)
-        self.color_names: Dict[int, str] = {}
+        self.color_names: dict[int, str] = {}
         self._color_name_lock = threading.Lock()
 
     def open(self) -> bool:
@@ -124,7 +124,8 @@ class HuskyLensReader:
 
                             try:
                                 self.color_queue.put(color_block, block=False)
-                            except:
+                            except Exception:
+                                # Queue full or other issue – silently drop the frame
                                 pass
 
                 time.sleep(self.poll_interval)
