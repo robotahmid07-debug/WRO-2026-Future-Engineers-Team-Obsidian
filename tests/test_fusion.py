@@ -2,7 +2,6 @@
 Unit tests for spatial map fusion (spatial gating, persistence, pruning).
 """
 
-import pytest
 import time
 from src.spatial_map import SpatialMap
 
