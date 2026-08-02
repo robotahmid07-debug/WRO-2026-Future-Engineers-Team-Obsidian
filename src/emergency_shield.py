@@ -101,18 +101,24 @@ class EmergencyShield:
             logger.info("Emergency shield: NORMAL MODE")
 
     def update(self) -> Dict[str, float]:
-        """Poll serial bridge for latest sensor data."""
-        msg = self.serial_bridge.receive(block=False)
-        if msg and msg.get('type') == 'sensor_data':
-            data = msg.get('data', {})
-            self.latest_distances['front'] = data.get('front', float('inf'))
-            self.latest_distances['front_left'] = data.get(
-                'front_left', float('inf')
-            )
-            self.latest_distances['front_right'] = data.get(
-                'front_right', float('inf')
-            )
+        """
+        Poll the shared sensor state instead of consuming from the serial queue.
+        Updates internal distances from the latest sensor data.
+        """
+        # Read from shared state (non‑consuming)
+        sensor_data = self.serial_bridge.get_latest_sensor_data()
+        if sensor_data and isinstance(sensor_data, dict):
+            # Map ultrasonic fields to front, front_left, front_right
+            # Assumes: ultrasonic1 = front, ultrasonic2 = left, ultrasonic3 = right
+            # Adjust keys if your ESP32 uses different field names.
+            self.latest_distances['front'] = sensor_data.get('ultrasonic1', float('inf'))
+            self.latest_distances['front_left'] = sensor_data.get('ultrasonic2', float('inf'))
+            self.latest_distances['front_right'] = sensor_data.get('ultrasonic3', float('inf'))
             self.last_update = time.time()
+        else:
+            # No new data – leave distances unchanged; log if stale
+            if time.time() - self.last_update > 0.5:
+                logger.warning("EmergencyShield: No sensor data for >0.5s")
         return self.latest_distances
 
     def set_target_steer_direction(self, direction: float):
