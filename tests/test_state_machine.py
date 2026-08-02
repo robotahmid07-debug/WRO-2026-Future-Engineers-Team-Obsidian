@@ -3,7 +3,6 @@ Unit tests for the State Machine.
 Mocks hardware dependencies to test logic in isolation.
 """
 
-import time
 from unittest.mock import Mock
 
 import pytest
