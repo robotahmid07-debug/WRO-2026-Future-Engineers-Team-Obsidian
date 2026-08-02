@@ -13,3 +13,5 @@ RPi.GPIO>=0.7.0          # GPIO control for hardware switches and buttons
 # Testing & Development
 pytest>=7.0              # Unit testing
 flake8>=6.0              # Code linting (CI)
+pyyaml
+pytest
