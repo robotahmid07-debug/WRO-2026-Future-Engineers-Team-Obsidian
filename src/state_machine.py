@@ -4,7 +4,7 @@ Supports both Open and Obstacle challenges.
 
 Integrates:
   - Challenge‑specific parameters (Open / Obstacle) from YAML.
-  - PID wall‑following controller (KP, KI, KD).
+  - PID wall‑following controller (KP, KI, KD) with LazyGo defaults.
   - Derivative + Percentage corner detection (dual validation).
   - Graded steering (partial → full steering based on corner strength).
   - Predictive speed control based on error derivative and absolute error.
@@ -23,17 +23,15 @@ import time
 import math
 import logging
 from enum import Enum
-from typing import Optional, List, Tuple
 
 from .config_parser import SystemConfig, ChallengeConfig
 from .localization import Localization
-from .vision_tracker import HuskyLensReader, ColorBlock
+from .vision_tracker import HuskyLensReader
 from .lidar_fusion import LidarFusion
-from .spatial_map import SpatialMap, TrackedObject
+from .spatial_map import SpatialMap
 from .emergency_shield import EmergencyShield
 from .steering_controller import SteeringController
 from .parking_controller import ParkingController
-from .wall_mapper import WallMapper
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +110,7 @@ class StateMachine:
 
         # ---- Read parameters from config (challenge‑specific) ----
         self.BASE_SPEED = self.nav_params.base_speed_mps
-        self.WALL_FOLLOW_GAIN = self.nav_params.wall_follow_gain  # kept for reference (fallback if PID disabled)
+        self.WALL_FOLLOW_GAIN = self.nav_params.wall_follow_gain
         self.STEER_MAGNITUDE = self.nav_params.steer_magnitude_radps
         self.STRAIGHT_BOOST = self.nav_params.straight_boost_factor
         self.CORNER_SLOWDOWN_MAX = self.nav_params.corner_slowdown_max_reduction
@@ -261,7 +259,7 @@ class StateMachine:
 
     def _compute_wall_steer(self) -> float:
         """
-        Compute wall‑following steering using PID (or fallback P‑only if PID not used).
+        Compute wall‑following steering using PID.
         Uses LIDAR side distances to calculate error and apply PID.
         """
         scan = self.lidar.get_scan_snapshot()
@@ -288,17 +286,14 @@ class StateMachine:
             self.prev_pid_error = error
 
             return wall_steer
-        else:
-            return 0.0
+
+        return 0.0
 
     def _update_lap_count(self):
         """Update lap count using LIDAR‑based corner detection with odometry fallback."""
         pose = self.localization.get_pose()
         if self.lap_start_pose is not None:
             self.distance_since_lap_start = abs(pose.x - self.lap_start_pose.x)
-
-        # Corner detection is handled inside _navigate_state()
-        # The sections_passed is incremented there.
 
         # Emergency lap fallback
         if self.sections_passed < 2 and self.distance_since_lap_start > (self.lap_length - self.emergency_margin):
@@ -428,8 +423,6 @@ class StateMachine:
 
             # ---- 2c. Wall‑following (PID) ----
             wall_steer = self._compute_wall_steer()
-            # For corner detection, we also need the error and side deltas
-            # We'll compute these inside _compute_wall_steer? We'll do it here.
 
             # Re‑compute LIDAR distances for corner detection
             scan = self.lidar.get_scan_snapshot()
@@ -477,7 +470,6 @@ class StateMachine:
                     if corner_detected:
                         # Graded steering
                         if self.use_graded:
-                            # Compute corner strength
                             corner_strength = max(abs(left_delta), abs(right_delta), left_pct, right_pct)
                             steer_multiplier = min(1.0, corner_strength / 0.5)
                             steer_multiplier = max(0.3, steer_multiplier)
@@ -488,7 +480,10 @@ class StateMachine:
                         # Count the corner
                         self.sections_passed += 1
                         self.last_section_time = time.time()
-                        logger.debug(f"Corner detected (deriv={deriv_trigger}, pct={pct_trigger}) -> sections={self.sections_passed}")
+                        logger.debug(
+                            f"Corner detected (deriv={deriv_trigger}, pct={pct_trigger}) "
+                            f"-> sections={self.sections_passed}"
+                        )
 
                 # Store previous distances
                 self.prev_left_dist = left_dist
@@ -556,7 +551,9 @@ class StateMachine:
                 yaw_rate = self.localization.latest_imu_yaw_rate
                 if yaw_rate is not None:
                     lateral_G = abs(linear * yaw_rate) / 9.81
-                    self.filtered_G = self.G_FILTER_ALPHA * lateral_G + (1 - self.G_FILTER_ALPHA) * self.filtered_G
+                    self.filtered_G = self.G_FILTER_ALPHA * lateral_G + (
+                        1 - self.G_FILTER_ALPHA
+                    ) * self.filtered_G
                     if self.filtered_G > self.MAX_SAFE_G:
                         linear *= self.MAX_SAFE_G / self.filtered_G
                         logger.debug(f"G‑force limiting: {self.filtered_G:.2f}G -> speed reduced")
@@ -571,7 +568,9 @@ class StateMachine:
         # ---- 4. Update localization with LIDAR points for mapping ----
         scan_data = self.lidar.get_scan_snapshot()
         lidar_subset = [(ang, dist) for ang, dist in scan_data.items() if abs(ang) % 5 < 1]
-        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(angular * self.config.vehicle.wheelbase_m, linear)
+        steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(
+            angular * self.config.vehicle.wheelbase_m, linear
+        )
         self.localization.update_pose(linear, steering_angle, lidar_points=lidar_subset)
 
         # ---- 5. Update lap counting ----
@@ -612,7 +611,10 @@ class StateMachine:
             return
 
         # ---- Drive toward parking spot ----
-        logger.info(f"Driving to parking spot (dist={distance:.2f}m, heading error={math.degrees(heading_error):.1f}°)")
+        logger.info(
+            f"Driving to parking spot (dist={distance:.2f}m, "
+            f"heading error={math.degrees(heading_error):.1f}°)"
+        )
 
         # Compute wall‑following steering (PID)
         wall_steer = self._compute_wall_steer()
