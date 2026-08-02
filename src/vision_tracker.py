@@ -2,7 +2,7 @@
 HuskyLens V2 reader using the official pyhuskylens library.
 Supports Color Recognition mode with proper protocol handling.
 """
-
+# hi
 import time
 import threading
 import logging
