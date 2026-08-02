@@ -33,12 +33,8 @@ class SerialBridge:
         self.baudrate = baudrate
         self.timeout = timeout
 
-        try:
-            self.ser = serial.Serial(port, baudrate, timeout=timeout)
-            logger.info(f"SerialBridge opened on {port} at {baudrate} baud")
-        except Exception as e:
-            logger.error(f"Failed to open serial port {port}: {e}")
-            self.ser = None
+        # Open the port immediately
+        self._open_port()
 
         # Shared sensor state (latest data from ESP32)
         self.latest_sensor_data: Optional[Dict[str, Any]] = None
@@ -46,6 +42,25 @@ class SerialBridge:
 
         # Internal buffer for incomplete lines
         self._buffer = ""
+
+    def _open_port(self):
+        """Internal method to open serial port."""
+        try:
+            self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+            logger.info(f"SerialBridge opened on {self.port} at {self.baudrate} baud")
+        except Exception as e:
+            logger.error(f"Failed to open serial port {self.port}: {e}")
+            self.ser = None
+
+    def open(self):
+        """
+        Public open method (for compatibility with main.py).
+        If port is closed, re‑open; otherwise do nothing.
+        """
+        if self.ser is None or not self.ser.is_open:
+            self._open_port()
+        else:
+            logger.debug("Serial port already open")
 
     def _verify_checksum(self, raw_bytes: bytes) -> bool:
         """
