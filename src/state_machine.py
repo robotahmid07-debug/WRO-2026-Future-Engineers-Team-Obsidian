@@ -466,7 +466,11 @@ class StateMachine:
                     left_delta = left_dist - self.prev_left_dist
                     right_delta = right_dist - self.prev_right_dist
 
-                    # Derivative trigger using real dt
+                    # === FIX 1: initialise left_pct / right_pct to avoid UnboundLocalError ===
+                    left_pct = 0.0
+                    right_pct = 0.0
+
+                    # Derivative trigger
                     deriv_trigger = False
                     if self.use_derivative:
                         # Compute rate of change per second
@@ -475,7 +479,7 @@ class StateMachine:
                         deriv_trigger = (abs(left_rate) > self.deriv_thresh or
                                          abs(right_rate) > self.deriv_thresh)
 
-                    # Percentage trigger (40%)
+                    # Percentage trigger (40%) – assigns left_pct/right_pct
                     pct_trigger = False
                     if self.use_percentage:
                         left_pct = abs(left_delta) / max(self.prev_left_dist, 0.1)
@@ -548,13 +552,15 @@ class StateMachine:
                     distance_factor = max(self.tl.distance_slowdown_min_factor, distance_factor)
                     distance_factor = min(1.0, distance_factor)
 
-                # LIDAR confirmation (safety)
+                # LIDAR confirmation (safety) – FIX 2: if LIDAR fails to confirm, fallback to wall‑following
                 if dist_to_pillar > 0:
                     angle_deg = math.degrees(math.atan2(target.local_x, target.local_y))
                     range_m = self.lidar.get_range_in_sector(angle_deg, 10.0)
                     if range_m is None or range_m > self.tl.lidar_confirm_range_m:
                         distance_factor = 1.0
                         traffic_angular = 0.0
+                        # Fallback to wall‑following only
+                        raw_angular = wall_steer
                         angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
 
             # ---- 2i. Straight‑line boost ----
