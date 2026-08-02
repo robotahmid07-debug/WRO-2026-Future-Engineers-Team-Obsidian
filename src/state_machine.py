@@ -551,9 +551,7 @@ class StateMachine:
                 yaw_rate = self.localization.latest_imu_yaw_rate
                 if yaw_rate is not None:
                     lateral_G = abs(linear * yaw_rate) / 9.81
-                    self.filtered_G = self.G_FILTER_ALPHA * lateral_G + (
-                        1 - self.G_FILTER_ALPHA
-                    ) * self.filtered_G
+                    self.filtered_G = self.G_FILTER_ALPHA * lateral_G + (1 - self.G_FILTER_ALPHA) * self.filtered_G
                     if self.filtered_G > self.MAX_SAFE_G:
                         linear *= self.MAX_SAFE_G / self.filtered_G
                         logger.debug(f"G‑force limiting: {self.filtered_G:.2f}G -> speed reduced")
