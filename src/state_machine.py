@@ -189,6 +189,9 @@ class StateMachine:
         """
         Extract the nearest left and right distances from a LIDAR scan.
 
+        Args:
+            scan: dictionary mapping angle (deg) → distance (m)
+
         Returns:
             (left_dist, right_dist) in meters, or (None, None) if not found.
         """
@@ -197,13 +200,17 @@ class StateMachine:
         for ang, dist in scan.items():
             if dist < 0.05 or dist > 5.0:
                 continue
-            if abs(ang - 90) < 10:
+            if abs(ang - 90) < 10:          # left sector
                 if left_dist is None or dist < left_dist:
                     left_dist = dist
-            elif abs(ang + 90) < 10:
+            elif abs(ang + 90) < 10:        # right sector
                 if right_dist is None or dist < right_dist:
                     right_dist = dist
         return left_dist, right_dist
+
+    # ==========================================================
+    # Public interface
+    # ==========================================================
 
     def run(self):
         """Main loop; call at ~20-50 Hz."""
@@ -219,6 +226,33 @@ class StateMachine:
         except Exception as e:
             logger.exception("State machine error: %s", e)
             self.steering.stop()
+
+    def reset(self):
+        """Reset all state machine counters and internal states."""
+        self.state = RobotState.INIT
+        self.lap_count = 0
+        self.sections_passed = 0
+        self.lap_start_pose = None
+        self.prev_left_dist = None
+        self.prev_right_dist = None
+        self.prev_error = 0.0
+        self.error_derivative = 0.0
+        self.pid_integral = 0.0
+        self.prev_pid_error = 0.0
+        self.filtered_G = 0.0
+        self.last_traffic_light_color = None
+        self.surprise_rule_activated = False
+        self.reverse_end_time = 0.0
+        self.last_loop_time = time.time()
+        if hasattr(self.emergency, 'reset'):
+            self.emergency.reset()
+        if hasattr(self.parking, 'reset'):
+            self.parking.reset()
+        logger.info("State machine reset to INIT")
+
+    # ==========================================================
+    # State handlers
+    # ==========================================================
 
     def _init_state(self):
         """Initialize robot state: register pose, reset counters."""
@@ -253,14 +287,9 @@ class StateMachine:
         self.prev_left_dist = None
         self.prev_right_dist = None
 
-        # Direction is already set from hardware switch
         logger.info(f"Lap 1 direction: {self.current_direction}")
-
-        # Reset LIDAR corner detection history
         self._prev_avg_left = None
         self._prev_avg_right = None
-
-        # Apply mapping enable/disable to localization
         self.localization.use_map_correction = self.use_mapping
 
         self.state = RobotState.NAVIGATE
@@ -274,7 +303,6 @@ class StateMachine:
             pass_side = self.config.traffic_light_passing_rules.GREEN_BLOCK_PASS_SIDE.upper()
         else:
             return 0.0
-
         if pass_side == "RIGHT":
             return -self.STEER_MAGNITUDE
         elif pass_side == "LEFT":
@@ -282,7 +310,7 @@ class StateMachine:
         else:
             return 0.0
 
-    def _compute_wall_steer(self, scan, dt: float) -> float:
+    def _compute_wall_steer(self, scan, dt: float):
         """
         Compute wall‑following steering using PID with real dt and pre‑fetched scan.
 
@@ -291,14 +319,14 @@ class StateMachine:
             dt: Elapsed time since last call (seconds).
 
         Returns:
-            Steering angle in range [-0.5, 0.5].
+            (steering_angle, left_dist, right_dist)
         """
         left_dist, right_dist = self._get_left_right_distances(scan)
         if left_dist is not None and right_dist is not None:
             error = left_dist - right_dist
             error_derivative = (error - self.prev_pid_error) / dt if dt > 0 else 0.0
 
-            # Only update integral if dt is reasonable
+            # Only update integral if dt is reasonable (avoid windup on long delays)
             if dt < 0.2:
                 self.pid_integral += error * dt
             self.pid_integral = max(-0.5, min(0.5, self.pid_integral))
@@ -306,8 +334,8 @@ class StateMachine:
             wall_steer = (self.KP * error) + (self.KI * self.pid_integral) + (self.KD * error_derivative)
             wall_steer = max(-0.5, min(0.5, wall_steer))
             self.prev_pid_error = error
-            return wall_steer
-        return 0.0
+            return wall_steer, left_dist, right_dist
+        return 0.0, None, None
 
     def _update_lap_count(self):
         """Update lap count using LIDAR‑based corner detection with odometry fallback."""
@@ -452,22 +480,18 @@ class StateMachine:
                 self.emergency.set_target_steer_direction(0.0)
 
             # ---- 2c. Wall‑following (PID with dynamic dt) ----
-            # Use the same scan to avoid re‑fetching
-            wall_steer = self._compute_wall_steer(scan, dt)
+            # This returns both the steering and the left/right distances
+            wall_steer, left_dist, right_dist = self._compute_wall_steer(scan, dt)
 
-            # Extract left/right distances once from the same scan
-            left_dist, right_dist = self._get_left_right_distances(scan)
-
+            # ---- Corner detection ----
             error = 0.0
             if left_dist is not None and right_dist is not None:
                 error = left_dist - right_dist
 
-                # ---- Corner detection (dual validation) ----
                 if self.prev_left_dist is not None and self.prev_right_dist is not None:
                     left_delta = left_dist - self.prev_left_dist
                     right_delta = right_dist - self.prev_right_dist
 
-                    # Initialise to avoid UnboundLocalError
                     left_pct = 0.0
                     right_pct = 0.0
 
@@ -507,11 +531,9 @@ class StateMachine:
                             f"-> sections={self.sections_passed}"
                         )
 
-                # Store previous distances
                 self.prev_left_dist = left_dist
                 self.prev_right_dist = right_dist
 
-                # Compute error derivative for predictive speed using real dt
                 if self.prev_error is not None and dt > 0:
                     self.error_derivative = (error - self.prev_error) / dt
                 self.prev_error = error
@@ -584,7 +606,7 @@ class StateMachine:
         self.steering.set_speed(linear, angular)
 
         # ---- 4. Update localization with LIDAR points for mapping ----
-        # Use the same scan we already have
+        # Reuse the same scan we already have
         lidar_subset = [(ang, dist) for ang, dist in scan.items() if abs(ang) % 5 < 1]
         steering_angle = 0.0 if abs(linear) < 0.001 else math.atan2(
             angular * self.config.vehicle.wheelbase_m, linear
@@ -631,10 +653,8 @@ class StateMachine:
             f"heading error={math.degrees(heading_error):.1f}°)"
         )
 
-        # Compute wall‑following steering – use a dummy scan (empty) to avoid fetching
-        # In the termination state we don't have a fresh scan, but we can reuse the last known one.
-        # However, to keep it simple, we call _compute_wall_steer with an empty dict (returns 0).
-        wall_steer = self._compute_wall_steer({}, 0.05)
+        # No fresh scan available; use dummy empty dict (wall_steer will be 0)
+        wall_steer, _, _ = self._compute_wall_steer({}, 0.05)
 
         steer_correction = 0.5 * heading_error
         steer_correction = max(-0.3, min(0.3, steer_correction))
@@ -665,25 +685,3 @@ class StateMachine:
     def _emergency_stop(self):
         self.steering.stop()
         logger.warning("Emergency stop")
-
-    def reset(self):
-        self.state = RobotState.INIT
-        self.lap_count = 0
-        self.sections_passed = 0
-        self.lap_start_pose = None
-        self.prev_left_dist = None
-        self.prev_right_dist = None
-        self.prev_error = 0.0
-        self.error_derivative = 0.0
-        self.pid_integral = 0.0
-        self.prev_pid_error = 0.0
-        self.filtered_G = 0.0
-        self.last_traffic_light_color = None
-        self.surprise_rule_activated = False
-        self.reverse_end_time = 0.0
-        self.last_loop_time = time.time()
-        if hasattr(self.emergency, 'reset'):
-            self.emergency.reset()
-        if hasattr(self.parking, 'reset'):
-            self.parking.reset()
-        logger.info("State machine reset to INIT")
