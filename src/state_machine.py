@@ -309,8 +309,7 @@ class StateMachine:
             logger.info(f"Lap {self.lap_count} completed")
 
             # Apply surprise rule after trigger lap
-            if (self.lap_count == self.config.surprise_rule.trigger_lap and
-                self.config.surprise_rule.enabled and not self.surprise_rule_activated):
+            if (self.lap_count == self.config.surprise_rule.trigger_lap and self.config.surprise_rule.enabled and not self.surprise_rule_activated):
                 self._apply_surprise_rule()
 
             if self.lap_count >= self.config.navigation_matrix.TOTAL_REQUIRED_LAPS:
@@ -606,7 +605,11 @@ class StateMachine:
             return
 
         # ---- Drive toward parking spot ----
-        logger.info(f"Driving to parking spot (dist={distance:.2f}m, heading error={math.degrees(heading_error):.1f}°)")
+        # Split long line to avoid E501
+        logger.info(
+            f"Driving to parking spot (dist={distance:.2f}m, "
+            f"heading error={math.degrees(heading_error):.1f}°)"
+        )
 
         # Compute wall‑following steering (PID)
         wall_steer = self._compute_wall_steer()
