@@ -33,7 +33,7 @@ class LidarFusion:
         self.running = False
         # Store raw scan data: angle (deg) -> distance (m)
         self.scan_data: Dict[float, float] = {}
-        # Store history for median filtering: angle -> deque of distances
+        # Store history for median filtering: angle (rounded) -> deque of distances
         self.scan_history: Dict[float, deque] = {}
         self.lock = threading.Lock()
         self.read_thread = None
@@ -78,15 +78,19 @@ class LidarFusion:
         """
         Apply 3‑sample median filter to smooth raw LIDAR distances.
         Eliminates individual laser dropouts.
+        Uses rounded angle as key to accumulate samples.
         """
+        # Use rounded angle to group nearby angles (bins of 1 degree)
+        key = round(angle)
+
         # Store raw distance in history buffer
-        if angle not in self.scan_history:
-            self.scan_history[angle] = deque(maxlen=self.median_filter_size)
-        self.scan_history[angle].append(raw_dist)
+        if key not in self.scan_history:
+            self.scan_history[key] = deque(maxlen=self.median_filter_size)
+        self.scan_history[key].append(raw_dist)
 
         # If we have enough samples, compute median
-        if len(self.scan_history[angle]) >= self.median_filter_size:
-            sorted_vals = sorted(self.scan_history[angle])
+        if len(self.scan_history[key]) >= self.median_filter_size:
+            sorted_vals = sorted(self.scan_history[key])
             return sorted_vals[len(sorted_vals) // 2]
         else:
             # Not enough samples yet – return raw value
