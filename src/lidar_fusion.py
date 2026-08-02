@@ -7,7 +7,7 @@ Provides front distance extraction for curvature estimation.
 
 import threading
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from collections import deque
 
 from rplidar import RPLidar
