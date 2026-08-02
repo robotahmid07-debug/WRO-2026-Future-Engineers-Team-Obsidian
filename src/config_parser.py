@@ -9,8 +9,7 @@ Includes all new sections:
 
 import yaml
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
-
+from typing import List, Dict, Any
 
 # ============================================================
 # Existing Dataclasses (unchanged)
@@ -228,8 +227,8 @@ class SystemConfig:
     lap_counting: LapCounting
     vehicle: Vehicle
     vision: Vision
-    navigation: NavigationBehavior          # <-- NEW
-    parking: ParkingConfig                  # <-- NEW
+    navigation: NavigationBehavior
+    parking: ParkingConfig
 
 
 # ============================================================
@@ -270,7 +269,6 @@ def load_config(yaml_path: str) -> SystemConfig:
     # ---- Navigation (open_challenge + obstacle_challenge) ----
     nav = sm['navigation']
 
-    # Helper to parse challenge params
     def parse_challenge_params(data: dict, is_obstacle: bool = False):
         pid = PIDParams(**data.get('pid', {'kp': 25.0, 'ki': 0.1, 'kd': 8.0}))
         corner = CornerDetectionParams(**data.get('corner_detection', {
@@ -282,7 +280,10 @@ def load_config(yaml_path: str) -> SystemConfig:
             'pct_threshold': 0.4,
             'imu_confirm_threshold_radps': 0.3
         }))
-        g_force = GForceParams(**data.get('g_force', {'max_safe_g': 0.30, 'filter_alpha': 0.3}))
+        g_force = GForceParams(**data.get('g_force', {
+            'max_safe_g': 0.30,
+            'filter_alpha': 0.3
+        }))
 
         if is_obstacle:
             traffic = TrafficLightParams(**data.get('traffic_light', {
@@ -296,8 +297,12 @@ def load_config(yaml_path: str) -> SystemConfig:
                 wall_follow_gain=data.get('wall_follow_gain', 0.25),
                 steer_magnitude_radps=data.get('steer_magnitude_radps', 0.30),
                 straight_boost_factor=data.get('straight_boost_factor', 1.10),
-                corner_slowdown_max_reduction=data.get('corner_slowdown_max_reduction', 0.4),
-                predictive_slowdown_gain=data.get('predictive_slowdown_gain', 0.4),
+                corner_slowdown_max_reduction=data.get(
+                    'corner_slowdown_max_reduction', 0.4
+                ),
+                predictive_slowdown_gain=data.get(
+                    'predictive_slowdown_gain', 0.4
+                ),
                 pid=pid,
                 corner_detection=corner,
                 g_force=g_force,
@@ -309,15 +314,23 @@ def load_config(yaml_path: str) -> SystemConfig:
                 wall_follow_gain=data.get('wall_follow_gain', 0.30),
                 steer_magnitude_radps=data.get('steer_magnitude_radps', 0.35),
                 straight_boost_factor=data.get('straight_boost_factor', 1.20),
-                corner_slowdown_max_reduction=data.get('corner_slowdown_max_reduction', 0.3),
-                predictive_slowdown_gain=data.get('predictive_slowdown_gain', 0.3),
+                corner_slowdown_max_reduction=data.get(
+                    'corner_slowdown_max_reduction', 0.3
+                ),
+                predictive_slowdown_gain=data.get(
+                    'predictive_slowdown_gain', 0.3
+                ),
                 pid=pid,
                 corner_detection=corner,
                 g_force=g_force
             )
 
-    open_params = parse_challenge_params(nav.get('open_challenge', {}), is_obstacle=False)
-    obstacle_params = parse_challenge_params(nav.get('obstacle_challenge', {}), is_obstacle=True)
+    open_params = parse_challenge_params(
+        nav.get('open_challenge', {}), is_obstacle=False
+    )
+    obstacle_params = parse_challenge_params(
+        nav.get('obstacle_challenge', {}), is_obstacle=True
+    )
     navigation = NavigationBehavior(open_challenge=open_params,
                                     obstacle_challenge=obstacle_params)
 
@@ -348,10 +361,18 @@ def load_config(yaml_path: str) -> SystemConfig:
     surprise = SurpriseRule(
         enabled=surprise_raw.get('enabled', surprise_defaults['enabled']),
         trigger_lap=surprise_raw.get('trigger_lap', surprise_defaults['trigger_lap']),
-        color_to_continue=surprise_raw.get('color_to_continue', surprise_defaults['color_to_continue']),
-        color_to_reverse=surprise_raw.get('color_to_reverse', surprise_defaults['color_to_reverse']),
-        fallback_direction=surprise_raw.get('fallback_direction', surprise_defaults['fallback_direction']),
-        turnaround_speed=surprise_raw.get('turnaround_speed', surprise_defaults['turnaround_speed'])
+        color_to_continue=surprise_raw.get(
+            'color_to_continue', surprise_defaults['color_to_continue']
+        ),
+        color_to_reverse=surprise_raw.get(
+            'color_to_reverse', surprise_defaults['color_to_reverse']
+        ),
+        fallback_direction=surprise_raw.get(
+            'fallback_direction', surprise_defaults['fallback_direction']
+        ),
+        turnaround_speed=surprise_raw.get(
+            'turnaround_speed', surprise_defaults['turnaround_speed']
+        )
     )
 
     # ---- Lap counting ----
@@ -363,8 +384,12 @@ def load_config(yaml_path: str) -> SystemConfig:
     lap_raw = sm.get('lap_counting', {})
     lap = LapCounting(
         lap_length_m=lap_raw.get('lap_length_m', lap_defaults['lap_length_m']),
-        section_fallback_timeout_s=lap_raw.get('section_fallback_timeout_s', lap_defaults['section_fallback_timeout_s']),
-        emergency_lap_margin_m=lap_raw.get('emergency_lap_margin_m', lap_defaults['emergency_lap_margin_m'])
+        section_fallback_timeout_s=lap_raw.get(
+            'section_fallback_timeout_s', lap_defaults['section_fallback_timeout_s']
+        ),
+        emergency_lap_margin_m=lap_raw.get(
+            'emergency_lap_margin_m', lap_defaults['emergency_lap_margin_m']
+        )
     )
 
     # ---- Vehicle ----
@@ -398,9 +423,15 @@ def load_config(yaml_path: str) -> SystemConfig:
     mapping_raw = sm.get('mapping', {})
     mapping = MappingConfig(
         use_mapping=mapping_raw.get('use_mapping', mapping_defaults['use_mapping']),
-        save_map_to_disk=mapping_raw.get('save_map_to_disk', mapping_defaults['save_map_to_disk']),
-        load_map_from_disk=mapping_raw.get('load_map_from_disk', mapping_defaults['load_map_from_disk']),
-        force_rebuild=mapping_raw.get('force_rebuild', mapping_defaults['force_rebuild'])
+        save_map_to_disk=mapping_raw.get(
+            'save_map_to_disk', mapping_defaults['save_map_to_disk']
+        ),
+        load_map_from_disk=mapping_raw.get(
+            'load_map_from_disk', mapping_defaults['load_map_from_disk']
+        ),
+        force_rebuild=mapping_raw.get(
+            'force_rebuild', mapping_defaults['force_rebuild']
+        )
     )
 
     # ---- Build and return SystemConfig ----
@@ -408,9 +439,13 @@ def load_config(yaml_path: str) -> SystemConfig:
         version=sm['version'],
         competition=sm['competition'],
         zone_management=zone_management,
-        sensor_fusion_and_tracking=SensorFusionTracking(**sm['sensor_fusion_and_tracking']),
+        sensor_fusion_and_tracking=SensorFusionTracking(
+            **sm['sensor_fusion_and_tracking']
+        ),
         ultrasonic_emergency_shield=ultrasonic_shield,
-        traffic_light_passing_rules=TrafficLightRules(**sm['traffic_light_passing_rules']),
+        traffic_light_passing_rules=TrafficLightRules(
+            **sm['traffic_light_passing_rules']
+        ),
         navigation_matrix=NavigationMatrix(**sm['navigation_matrix']),
         state_machine=StateMachine(**sm['state_machine']),
         mapping=mapping,
