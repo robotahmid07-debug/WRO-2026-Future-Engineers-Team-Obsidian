@@ -4,7 +4,7 @@ Supports both Open and Obstacle challenges.
 
 Integrates:
   - Challenge‑specific parameters (Open / Obstacle) from YAML.
-  - Adaptive wall‑following with PID control (P‑only for now, full PID ready).
+  - PID wall‑following controller (KP, KI, KD) with LazyGo defaults.
   - Derivative + Percentage corner detection (dual validation).
   - Graded steering (partial → full steering based on corner strength).
   - Predictive speed control based on error derivative and absolute error.
@@ -112,16 +112,19 @@ class StateMachine:
 
         # ---- Read parameters from config (challenge‑specific) ----
         self.BASE_SPEED = self.nav_params.base_speed_mps
-        self.WALL_FOLLOW_GAIN = self.nav_params.wall_follow_gain
+        self.WALL_FOLLOW_GAIN = self.nav_params.wall_follow_gain  # kept for reference (fallback if PID disabled)
         self.STEER_MAGNITUDE = self.nav_params.steer_magnitude_radps
         self.STRAIGHT_BOOST = self.nav_params.straight_boost_factor
         self.CORNER_SLOWDOWN_MAX = self.nav_params.corner_slowdown_max_reduction
         self.PREDICTIVE_GAIN = self.nav_params.predictive_slowdown_gain
 
-        # ---- PID gains ----
+        # ---- PID gains (LazyGo defaults) ----
         self.KP = self.nav_params.pid.kp
         self.KI = self.nav_params.pid.ki
         self.KD = self.nav_params.pid.kd
+        self.pid_integral = 0.0
+        self.prev_pid_error = 0.0
+        self.pid_dt = 0.05  # 20 Hz loop
 
         # ---- Corner detection params ----
         self.cd = self.nav_params.corner_detection
@@ -167,10 +170,6 @@ class StateMachine:
         self.reverse_end_time = 0.0
         self.reverse_speed = 0.0
         self.reverse_steer = 0.0
-
-        # ---- PID state ----
-        self.integral = 0.0
-        self.prev_pid_error = 0.0
 
         # ---- G‑force filter ----
         self.filtered_G = 0.0
@@ -224,7 +223,7 @@ class StateMachine:
         self.surprise_rule_activated = False
 
         # Reset PID state
-        self.integral = 0.0
+        self.pid_integral = 0.0
         self.prev_pid_error = 0.0
         self.prev_error = 0.0
         self.error_derivative = 0.0
@@ -261,7 +260,10 @@ class StateMachine:
             return 0.0
 
     def _compute_wall_steer(self) -> float:
-        """Compute wall‑following steering from LIDAR side distances."""
+        """
+        Compute wall‑following steering using PID (or fallback P‑only if PID not used).
+        Uses LIDAR side distances to calculate error and apply PID.
+        """
         scan = self.lidar.get_scan_snapshot()
         left_dist = None
         right_dist = None
@@ -272,10 +274,22 @@ class StateMachine:
                 left_dist = dist if left_dist is None or dist < left_dist else left_dist
             elif abs(ang + 90) < 10:
                 right_dist = dist if right_dist is None or dist < right_dist else right_dist
+
         if left_dist is not None and right_dist is not None:
             error = left_dist - right_dist
-            return self.WALL_FOLLOW_GAIN * error
-        return 0.0
+
+            # ---- PID controller ----
+            error_derivative = (error - self.prev_pid_error) / self.pid_dt
+            self.pid_integral += error * self.pid_dt
+            # Anti‑windup clamp
+            self.pid_integral = max(-0.5, min(0.5, self.pid_integral))
+            wall_steer = (self.KP * error) + (self.KI * self.pid_integral) + (self.KD * error_derivative)
+            wall_steer = max(-0.5, min(0.5, wall_steer))
+            self.prev_pid_error = error
+
+            return wall_steer
+        else:
+            return 0.0
 
     def _update_lap_count(self):
         """Update lap count using LIDAR‑based corner detection with odometry fallback."""
@@ -412,7 +426,12 @@ class StateMachine:
             else:
                 self.emergency.set_target_steer_direction(0.0)
 
-            # ---- 2c. Wall‑following (LIDAR) ----
+            # ---- 2c. Wall‑following (PID) ----
+            wall_steer = self._compute_wall_steer()
+            # For corner detection, we also need the error and side deltas
+            # We'll compute these inside _compute_wall_steer? We'll do it here.
+
+            # Re‑compute LIDAR distances for corner detection
             scan = self.lidar.get_scan_snapshot()
             left_dist = None
             right_dist = None
@@ -424,14 +443,9 @@ class StateMachine:
                 elif abs(ang + 90) < 10:
                     right_dist = dist if right_dist is None or dist < right_dist else right_dist
 
-            wall_steer = 0.0
             error = 0.0
             if left_dist is not None and right_dist is not None:
                 error = left_dist - right_dist
-
-                # PID wall‑following (P‑only for now, full PID ready)
-                wall_steer = self.WALL_FOLLOW_GAIN * error
-                wall_steer = max(-0.5, min(0.5, wall_steer))
 
                 # ---- Corner detection (dual validation) ----
                 if self.prev_left_dist is not None and self.prev_right_dist is not None:
@@ -600,12 +614,12 @@ class StateMachine:
         # ---- Drive toward parking spot ----
         logger.info(f"Driving to parking spot (dist={distance:.2f}m, heading error={math.degrees(heading_error):.1f}°)")
 
-        # Compute wall‑following steering (to keep on track)
+        # Compute wall‑following steering (PID)
         wall_steer = self._compute_wall_steer()
 
         # Steering correction to align with target heading
         # Simple proportional control
-        steer_correction = 0.5 * heading_error   # gain, can be tuned
+        steer_correction = 0.5 * heading_error
         steer_correction = max(-0.3, min(0.3, steer_correction))
 
         # Blend: 70% navigation, 30% wall‑following for stability
@@ -646,7 +660,7 @@ class StateMachine:
         self.prev_right_dist = None
         self.prev_error = 0.0
         self.error_derivative = 0.0
-        self.integral = 0.0
+        self.pid_integral = 0.0
         self.prev_pid_error = 0.0
         self.filtered_G = 0.0
         self.last_traffic_light_color = None
