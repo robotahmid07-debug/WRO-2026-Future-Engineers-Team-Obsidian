@@ -370,9 +370,9 @@ class StateMachine:
             if 'imu_yaw_rate' in data:
                 self.localization.update_imu_data(data['imu_yaw_rate'])
         else:
-            # Use latest shared sensor data if available
+            # Use latest shared sensor data if available (and it's a dict)
             latest = self.serial_bridge.get_latest_sensor_data()
-            if latest and 'imu_yaw_rate' in latest:
+            if latest and isinstance(latest, dict) and 'imu_yaw_rate' in latest:
                 self.localization.update_imu_data(latest['imu_yaw_rate'])
 
         # ---- 1. Emergency shield ----
@@ -696,3 +696,5 @@ class StateMachine:
         if hasattr(self.parking, 'reset'):
             self.parking.reset()
         logger.info("State machine reset to INIT")
+
+  
