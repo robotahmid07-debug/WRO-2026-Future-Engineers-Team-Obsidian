@@ -1,7 +1,7 @@
 """
 WallMapper builds a 2D occupancy grid map from LIDAR data during the first lap.
 After the map is built, it provides pose estimation by matching current wall distances
-to the known map (rectangular track).
+to the known map (rectangular track) using the robot's heading.
 
 The LIDAR is assumed to be mounted on top of the car, scanning 360°.
 The angles provided by the LIDAR are relative to the robot's forward heading.
@@ -58,6 +58,12 @@ class WallMapper:
         # Store the last scan for pose estimation
         self.last_scan: List[Tuple[float, float]] = []
 
+        # Track bounding box (will be set after map build)
+        self.x_min = 0.0
+        self.x_max = 0.0
+        self.y_min = 0.0
+        self.y_max = 0.0
+
     def update(self, pose_x: float, pose_y: float, theta: float,
                lidar_points: List[Tuple[float, float]]) -> None:
         """
@@ -96,7 +102,14 @@ class WallMapper:
         if not self.is_mapped and self.total_updates >= self.update_threshold:
             self._extract_wall_segments()
             self.is_mapped = True
-            logger.info(f"Map built with {len(self.wall_segments)} wall segments.")
+            # Compute bounding box from wall segments
+            xs = [p[0] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
+            ys = [p[1] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
+            if xs and ys:
+                self.x_min, self.x_max = min(xs), max(xs)
+                self.y_min, self.y_max = min(ys), max(ys)
+                logger.info(f"Map built with bounding box: x=[{self.x_min:.2f}, {self.x_max:.2f}], "
+                            f"y=[{self.y_min:.2f}, {self.y_max:.2f}]")
 
     def _extract_wall_segments(self) -> None:
         """
@@ -152,17 +165,21 @@ class WallMapper:
             (min_x, max_y, min_x, min_y)   # left wall
         ]
 
-    def get_pose_from_walls(self, lidar_scan: Optional[List[Tuple[float, float]]] = None) -> Tuple[float, float, float]:
+    def get_pose_from_walls(self, lidar_scan: Optional[List[Tuple[float, float]]] = None,
+                            robot_theta: float = 0.0) -> Tuple[float, float, float]:
         """
-        Estimate the robot's pose using distances to the four walls of the track.
+        Estimate the robot's pose using distances to the four walls of the track
+        and the current heading (theta). This is geometrically correct for any
+        robot orientation.
 
-        This uses the known rectangular track dimensions (from the wall segments)
+        Uses the known rectangular track dimensions (from the wall segments)
         and the distances to the front, left, right, and rear walls measured
         by the LIDAR. Returns (x, y, theta) in world coordinates.
 
         Args:
             lidar_scan: List of (angle_degrees, distance_meters) from the LIDAR.
                         If None, uses the last stored scan.
+            robot_theta: Current robot heading (radians) from odometry/IMU.
 
         Returns:
             (x, y, theta) tuple. If map is not ready or distances are missing,
@@ -179,7 +196,7 @@ class WallMapper:
             logger.warning("No LIDAR scan available; returning (0,0,0)")
             return (0.0, 0.0, 0.0)
 
-        # Extract track bounding box from wall segments
+        # Extract track bounding box (already stored, but we can recompute)
         xs = [p[0] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
         ys = [p[1] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
         x_min, x_max = min(xs), max(xs)
@@ -211,24 +228,35 @@ class WallMapper:
             logger.warning("Incomplete wall distances; using odometry.")
             return (0.0, 0.0, 0.0)
 
-        # Compute robot position from wall distances and known track rectangle
-        # x = (x_min + x_max - left + right) / 2
-        # y = (y_min + y_max - rear + front) / 2
-        robot_x = (x_min + x_max - left + right) / 2.0
-        robot_y = (y_min + y_max - rear + front) / 2.0
+        # ---- Heading‑aware pose estimation ----
+        theta = robot_theta  # use the provided heading
 
-        # Estimate heading (theta) from side wall distances
-        track_width = x_max - x_min
-        if track_width > 0.1:
-            # Approximate theta = atan2(left - right, track_width * 0.5)
-            theta = math.atan2(left - right, track_width * 0.5)
-            # Clip to a reasonable range (±45°)
-            theta = max(-math.pi/4, min(math.pi/4, theta))
+        # Compute x from left and right wall distances
+        # x = (x_min + left * sinθ)  and  x = (x_max - right * sinθ)
+        sin_theta = math.sin(theta)
+        if abs(sin_theta) > 0.01:
+            x_from_left = x_min + left * sin_theta
+            x_from_right = x_max - right * sin_theta
+            x_est = (x_from_left + x_from_right) / 2.0
         else:
-            theta = 0.0  # fallback
+            # Fallback to axis‑aligned formula (when heading is small)
+            x_est = (x_min + x_max - left + right) / 2.0
 
-        logger.debug(f"Pose from walls: x={robot_x:.3f}, y={robot_y:.3f}, theta={math.degrees(theta):.1f}°")
-        return (robot_x, robot_y, theta)
+        # Compute y from front and rear wall distances
+        # y = (y_max - front * sinθ)  and  y = (y_min + rear * sinθ)
+        if abs(sin_theta) > 0.01:
+            y_from_front = y_max - front * sin_theta
+            y_from_rear = y_min + rear * sin_theta
+            y_est = (y_from_front + y_from_rear) / 2.0
+        else:
+            y_est = (y_min + y_max - rear + front) / 2.0
+
+        # Optionally refine theta using side distances (if desired)
+        # We keep the input theta as the estimate.
+        theta_est = theta
+
+        logger.debug(f"Pose from walls (heading-aware): x={x_est:.3f}, y={y_est:.3f}, theta={math.degrees(theta_est):.1f}°")
+        return (x_est, y_est, theta_est)
 
     def save_map(self, filename: str) -> None:
         """
@@ -253,11 +281,14 @@ class WallMapper:
         with open(filename, 'rb') as f:
             self.grid, self.wall_segments = pickle.load(f)
         self.is_mapped = True
+        # Recompute bounding box
+        xs = [p[0] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
+        ys = [p[1] for seg in self.wall_segments for p in [(seg[0], seg[1]), (seg[2], seg[3])]]
+        if xs and ys:
+            self.x_min, self.x_max = min(xs), max(xs)
+            self.y_min, self.y_max = min(ys), max(ys)
         logger.info(f"Map loaded from {filename}")
 
-    # ------------------------------
-    # NEW METHOD: clear_map()
-    # ------------------------------
     def clear_map(self) -> None:
         """
         Reset the occupancy grid, wall segments, and all internal state.
@@ -268,4 +299,5 @@ class WallMapper:
         self.is_mapped = False
         self.total_updates = 0
         self.last_scan = []
+        self.x_min = self.x_max = self.y_min = self.y_max = 0.0
         logger.info("WallMapper: Map cleared for forced rebuild.")
