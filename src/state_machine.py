@@ -18,7 +18,7 @@ Integrates:
   - Direct navigation to parking lot using LIDAR‑based localization.
   - All calibratable parameters read from config.
 """
-# trigger
+
 import time
 import math
 import logging
@@ -122,7 +122,6 @@ class StateMachine:
         self.KD = self.nav_params.pid.kd
         self.pid_integral = 0.0
         self.prev_pid_error = 0.0
-        self.pid_dt = 0.05  # 20 Hz loop
 
         # ---- Corner detection params ----
         self.cd = self.nav_params.corner_detection
@@ -171,6 +170,9 @@ class StateMachine:
 
         # ---- G‑force filter ----
         self.filtered_G = 0.0
+
+        # ---- Dynamic PID dt ----
+        self.last_loop_time = time.time()
 
         # Give emergency shield access to LIDAR
         self.emergency.set_lidar(self.lidar)
@@ -257,10 +259,15 @@ class StateMachine:
         else:
             return 0.0
 
-    def _compute_wall_steer(self) -> float:
+    def _compute_wall_steer(self, dt: float) -> float:
         """
-        Compute wall‑following steering using PID.
-        Uses LIDAR side distances to calculate error and apply PID.
+        Compute wall‑following steering using PID with real dt.
+
+        Args:
+            dt: Elapsed time since last call (seconds).
+
+        Returns:
+            Steering angle in range [-0.5, 0.5].
         """
         scan = self.lidar.get_scan_snapshot()
         left_dist = None
@@ -276,15 +283,19 @@ class StateMachine:
         if left_dist is not None and right_dist is not None:
             error = left_dist - right_dist
 
-            # ---- PID controller ----
-            error_derivative = (error - self.prev_pid_error) / self.pid_dt
-            self.pid_integral += error * self.pid_dt
-            # Anti‑windup clamp
+            # ---- PID controller with anti‑windup ----
+            error_derivative = (error - self.prev_pid_error) / dt if dt > 0 else 0.0
+
+            # Only update integral if dt is reasonable (avoid windup on long delays)
+            if dt < 0.2:
+                self.pid_integral += error * dt
+            # Clamp integral
             self.pid_integral = max(-0.5, min(0.5, self.pid_integral))
+
             wall_steer = (self.KP * error) + (self.KI * self.pid_integral) + (self.KD * error_derivative)
             wall_steer = max(-0.5, min(0.5, wall_steer))
-            self.prev_pid_error = error
 
+            self.prev_pid_error = error
             return wall_steer
 
         return 0.0
@@ -347,12 +358,22 @@ class StateMachine:
 
     def _navigate_state(self):
         """Main navigation loop with sensor fusion and control."""
+        current_time = time.time()
+        dt = current_time - self.last_loop_time
+        self.last_loop_time = current_time
+
         # ---- 0. Receive IMU data from ESP32 ----
+        # Try to get fresh sensor data; fallback to shared state if none.
         sensor_msg = self.serial_bridge.receive(block=False)
         if sensor_msg and sensor_msg.get('type') == 'sensor_data':
             data = sensor_msg.get('data', {})
             if 'imu_yaw_rate' in data:
                 self.localization.update_imu_data(data['imu_yaw_rate'])
+        else:
+            # Use latest shared sensor data if available
+            latest = self.serial_bridge.get_latest_sensor_data()
+            if latest and 'imu_yaw_rate' in latest:
+                self.localization.update_imu_data(latest['imu_yaw_rate'])
 
         # ---- 1. Emergency shield ----
         self.emergency.update()
@@ -370,7 +391,6 @@ class StateMachine:
             return
 
         # ---- 2. Check if reversing ----
-        current_time = time.time()
         if current_time < self.reverse_end_time:
             linear = self.reverse_speed
             angular = self.reverse_steer
@@ -422,8 +442,8 @@ class StateMachine:
             else:
                 self.emergency.set_target_steer_direction(0.0)
 
-            # ---- 2c. Wall‑following (PID) ----
-            wall_steer = self._compute_wall_steer()
+            # ---- 2c. Wall‑following (PID with dynamic dt) ----
+            wall_steer = self._compute_wall_steer(dt)
 
             # Re‑compute LIDAR distances for corner detection
             scan = self.lidar.get_scan_snapshot()
@@ -446,11 +466,14 @@ class StateMachine:
                     left_delta = left_dist - self.prev_left_dist
                     right_delta = right_dist - self.prev_right_dist
 
-                    # Derivative trigger
+                    # Derivative trigger using real dt
                     deriv_trigger = False
                     if self.use_derivative:
-                        deriv_trigger = (abs(left_delta) > self.deriv_thresh or
-                                         abs(right_delta) > self.deriv_thresh)
+                        # Compute rate of change per second
+                        left_rate = left_delta / dt if dt > 0 else 0
+                        right_rate = right_delta / dt if dt > 0 else 0
+                        deriv_trigger = (abs(left_rate) > self.deriv_thresh or
+                                         abs(right_rate) > self.deriv_thresh)
 
                     # Percentage trigger (40%)
                     pct_trigger = False
@@ -490,9 +513,8 @@ class StateMachine:
                 self.prev_left_dist = left_dist
                 self.prev_right_dist = right_dist
 
-                # Compute error derivative for predictive speed
-                if self.prev_error is not None:
-                    dt = 0.05  # fixed 20 Hz
+                # Compute error derivative for predictive speed using real dt
+                if self.prev_error is not None and dt > 0:
                     self.error_derivative = (error - self.prev_error) / dt
                 self.prev_error = error
 
@@ -559,7 +581,7 @@ class StateMachine:
 
             # ---- 2l. Update spatial map with velocity‑compensated pruning ----
             if detections:
-                self.spatial_map.update(detections, robot_speed=linear, dt=0.05)
+                self.spatial_map.update(detections, robot_speed=linear, dt=dt)
 
         # ---- 3. Apply steering ----
         self.steering.set_speed(linear, angular)
@@ -615,8 +637,8 @@ class StateMachine:
             f"heading error={math.degrees(heading_error):.1f}°)"
         )
 
-        # Compute wall‑following steering (PID)
-        wall_steer = self._compute_wall_steer()
+        # Compute wall‑following steering (PID) – use a small dt estimate (0.05)
+        wall_steer = self._compute_wall_steer(0.05)
 
         # Steering correction to align with target heading
         # Simple proportional control
@@ -667,4 +689,10 @@ class StateMachine:
         self.last_traffic_light_color = None
         self.surprise_rule_activated = False
         self.reverse_end_time = 0.0
+        self.last_loop_time = time.time()
+        # Reset submodules if they have reset methods
+        if hasattr(self.emergency, 'reset'):
+            self.emergency.reset()
+        if hasattr(self.parking, 'reset'):
+            self.parking.reset()
         logger.info("State machine reset to INIT")
