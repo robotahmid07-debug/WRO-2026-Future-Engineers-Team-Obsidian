@@ -1,6 +1,6 @@
-⚠️ The ONE Thing You Must Calibrate on Race Day
+# ONE Thing I Must Calibrate on Race Day
 The code is logically complete, but these physical constants need tuning for your specific robot:
-
+# shafi and Tahmid cheack those codes and constrains
 Constant	Where to change	Default	How to calibrate
 Wheelbase	steering_controller.py (line 40)	0.25 m	Measure distance between front and rear axles.
 Track width	steering_controller.py (line 41)	0.15 m	Measure distance between left and right rear wheels.
