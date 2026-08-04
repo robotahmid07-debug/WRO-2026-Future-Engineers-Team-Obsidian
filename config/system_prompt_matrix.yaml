@@ -50,11 +50,15 @@ system_prompt_matrix:
   # ==========================================
   sensor_fusion_and_tracking:
     huskylens_camera:
+      i2c_bus: 1
+      poll_interval: 0.05
       role: "RAW_BOUNDING_BOX_DETECTOR"
       outputs: ["COLOR_ID", "CENTROID_X", "CENTROID_Y", "WIDTH", "HEIGHT"]
       horizontal_fov_deg: 60.0
 
     lidar_2d:
+      port: "/dev/ttyUSB1"
+      baudrate: 460800
       scan_arc_deg: 90.0
       update_rate_hz: 10
 
@@ -84,14 +88,28 @@ system_prompt_matrix:
   # ==========================================
   ultrasonic_emergency_shield:
     enabled: True
+    # ---- Feature toggles (new) ----
+    enable_reverse: True                # Enable/disable reverse on critical stop
+    enable_rear_check: True             # Enable/disable LIDAR rear check before reverse
+    enable_hard_shield: True            # Enable/disable the 5 cm hard shield (last‑resort)
+    enable_hard_steer: True             # Enable/disable hard steer + crawl when rear blocked
+
     thresholds_cm:
       front_stop: 12.0                  # Start reducing speed
       front_left_safety: 18.0           # Steer right if left side close
       front_right_safety: 18.0          # Steer left if right side close
-      critical_stop: 8.0                # <-- NEW: Reverse if closer than this
+      critical_stop: 8.0                # Reverse if closer than this
+      hard_shield_cm: 5.0               # Last‑resort emergency threshold
+
     dynamic_throttle:
       enable_speed_dampening: True
       dampened_speed_factor: 0.60
+
+    # ---- Reverse parameters (tuneable) ----
+    reverse_params:
+      speed_mps: -0.10                  # m/s (negative = reverse)
+      duration_s: 1.0                   # seconds
+      rear_clearance_threshold_m: 0.15  # meters (15 cm)
 
   # ==========================================
   # 4. SURPRISE TASK & DYNAMIC RULES
@@ -230,3 +248,46 @@ system_prompt_matrix:
         distance_slowdown_min_factor: 0.4
         steering_slowdown_max_reduction: 0.4
         lidar_confirm_range_m: 2.5
+
+  # ==========================================
+  # MAPPING CONFIGURATION
+  # ==========================================
+  mapping:
+    use_mapping: True
+    save_map_to_disk: True
+    load_map_from_disk: True
+    force_rebuild: False
+
+  # ==========================================
+  # SURPRISE RULE
+  # ==========================================
+  surprise_rule:
+    enabled: True
+    trigger_lap: 2
+    color_to_continue: "GREEN"
+    color_to_reverse: "RED"
+    fallback_direction: "REVERSE"
+    turnaround_speed: 0.1               # m/s during U‑turn
+
+  # ==========================================
+  # LAP COUNTING
+  # ==========================================
+  lap_counting:
+    lap_length_m: 12.0
+    section_fallback_timeout_s: 3.0
+    emergency_lap_margin_m: 0.2
+
+  # ==========================================
+  # VEHICLE PHYSICAL PARAMETERS
+  # ==========================================
+  vehicle:
+    wheelbase_m: 0.25
+    max_speed_mps: 1.5                  # Absolute hard limit (never exceed this)
+    max_steer_rad: 0.524                # 30°
+
+  # ==========================================
+  # VISION (HuskyLens)
+  # ==========================================
+  vision:
+    color_red_id: 1
+    color_green_id: 2
