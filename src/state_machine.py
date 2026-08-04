@@ -46,7 +46,7 @@ class RobotState(Enum):
     NAVIGATE = 2
     TERMINATION = 3
     EMERGENCY_STOP = 4
-    SEARCH_PARKING = 5   # NEW: Phase 2
+    SEARCH_PARKING = 5   # NEW: Phase 2 – continuous parking search
 
 
 class StateMachine:
