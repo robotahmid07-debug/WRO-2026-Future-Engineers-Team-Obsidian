@@ -26,6 +26,7 @@ import time
 import math
 import logging
 from enum import Enum
+from typing import Optional
 
 from .config_parser import SystemConfig, ChallengeConfig
 from .localization import Localization
@@ -401,7 +402,7 @@ class StateMachine:
         curvature = diff / (corridor_width * corridor_width)  # rough curvature estimate
 
         # Ackermann feedforward: steer = atan(wheelbase * curvature)
-        ff_steer = math.atan(self.wheelbase * curvature)
+        ff_steer = math.atan(self.config.vehicle.wheelbase_m * curvature)
         return max(-0.3, min(0.3, ff_steer))  # clamp to reasonable range
 
     def _compute_target_speed(self, scan, corner_detected: bool, corner_strength: float) -> float:
