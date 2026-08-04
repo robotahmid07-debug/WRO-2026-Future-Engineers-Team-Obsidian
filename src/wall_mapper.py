@@ -9,7 +9,7 @@ The angles provided by the LIDAR are relative to the robot's forward heading.
 
 import math
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
 import numpy as np
@@ -220,3 +220,45 @@ class WallMapper:
         self.last_scan = []
         self.x_min = self.x_max = self.y_min = self.y_max = 0.0
         logger.info("WallMapper: Map cleared for forced rebuild.")
+
+
+# ================================================================
+# NEW FUNCTION: Autonomous Direction Detection (Section C)
+# ================================================================
+
+def detect_direction_from_scan(lidar_scan: Dict[float, float],
+                                window_deg: float = 60.0,
+                                min_confidence_m: float = 0.15) -> str:
+    """
+    Infer CLOCKWISE / COUNTER_CLOCKWISE from a single stationary LIDAR scan
+    taken at the start line, before any movement. Whichever lateral side
+    reads a larger open distance indicates the direction the track
+    continues (mirrors the wall-asymmetry approach other WRO teams use
+    instead of a pre-set switch).
+
+    Defaults to "CLOCKWISE" if the scan is empty or the two sides are too
+    close to call confidently (avoids guessing wrong on ambiguous data).
+
+    Args:
+        lidar_scan: Dictionary mapping angle (deg) → distance (m)
+        window_deg: Half‑width of the sampling window around left/right (90° and -90°)
+        min_confidence_m: Minimum distance gap between left and right to trust the result
+
+    Returns:
+        "CLOCKWISE" or "COUNTER_CLOCKWISE"
+    """
+    left_vals = [d for ang, d in lidar_scan.items()
+                 if abs(ang - 90) <= window_deg / 2 and d > 0.02]
+    right_vals = [d for ang, d in lidar_scan.items()
+                  if abs(ang + 90) <= window_deg / 2 and d > 0.02]
+
+    if not left_vals or not right_vals:
+        return "CLOCKWISE"
+
+    left_open = max(left_vals)
+    right_open = max(right_vals)
+
+    if abs(left_open - right_open) < min_confidence_m:
+        return "CLOCKWISE"
+
+    return "CLOCKWISE" if right_open > left_open else "COUNTER_CLOCKWISE"
