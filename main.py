@@ -186,7 +186,11 @@ def main():
     # 8. LIDAR‑based parking controller
     # ------------------------------------------------------------------
     parking = ParkingController(localization, steering, lidar, config.zone_management)
-    logger.info("Parking controller initialized")
+
+    # ---- NEW: Pass emergency shield reference to parking controller ----
+    parking.set_emergency_shield(emergency)
+
+    logger.info("Parking controller initialized with emergency shield reference")
 
     # ------------------------------------------------------------------
     # 9. State Machine with hardware-selected direction
