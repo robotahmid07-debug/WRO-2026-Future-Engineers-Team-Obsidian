@@ -1,0 +1,18 @@
+LIdar usb port
+
+🔧 To Make the USB Port Fixed (Optional)
+Create a udev rule (on your Raspberry Pi):
+
+bash
+sudo nano /etc/udev/rules.d/99-rplidar.rules
+Add this line (replace 1a86:7523 with your LIDAR's USB vendor/product ID – find it with lsusb):
+
+text
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="rplidar"
+Then:
+
+bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+Now your LIDAR will always be available at /dev/rplidar, regardless of which USB port it's plugged into.
+
