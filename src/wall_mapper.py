@@ -188,7 +188,7 @@ class WallMapper:
 
         theta_est = robot_theta
 
-        # Fixed indentation: continuation lines aligned with the opening parenthesis
+        # Fixed indentation: continuation lines aligned with opening parenthesis
         logger.debug(
             f"Pose from walls (cardinal {cardinal*90}°): x={robot_x:.3f}, y={robot_y:.3f}, "
             f"theta={math.degrees(theta_est):.1f}°"
