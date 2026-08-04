@@ -1,8 +1,7 @@
 # ==========================================
-#  Written by Team Obsidian
-#  Update date : 2026-07-31
+# Written by Tahmed Ahmed
+# Update date : 26-7-26
 # ==========================================
-
 system_prompt_matrix:
   version: "2026.3"
   competition: "WRO Future Engineers"
@@ -10,8 +9,8 @@ system_prompt_matrix:
   # ==========================================
   # 0. CHALLENGE SELECTION
   # ==========================================
-  # This is optional – if set, it overrides the hardware switch (GPIO 22).
-  # Leave commented to use the hardware switch.
+  # This is optional – if set, it overrides the hardware switch.
+  # Leave commented to use the hardware switch (GPIO 22).
   # active_challenge: "open"   # "open" or "obstacle"
 
   # ==========================================
@@ -72,7 +71,7 @@ system_prompt_matrix:
         tolerance_radius_m: 0.20
 
       debouncing_and_persistence:
-        confirmation_threshold_frames: 2
+        confirmation_threshold_frames: 3
         frame_loss_tolerance_sec: 1.5
         prune_condition: "Y_LOCAL < 0.0"
 
@@ -85,31 +84,71 @@ system_prompt_matrix:
   # ==========================================
   ultrasonic_emergency_shield:
     enabled: True
-    # ---- Feature toggles (new) ----
-    enable_reverse: True                # Enable/disable reverse on critical stop
-    enable_rear_check: True             # Enable/disable LIDAR rear check before reverse
-    enable_hard_shield: True            # Enable/disable the 5 cm hard shield (last‑resort)
-    enable_hard_steer: True             # Enable/disable hard steer + crawl when rear blocked
-
     thresholds_cm:
       front_stop: 12.0                  # Start reducing speed
-      front_left_safety: 18.0           # Side avoidance trigger
-      front_right_safety: 18.0
-      critical_stop: 8.0                # Reverse/hard steer trigger
-      hard_shield_cm: 5.0               # <-- NEW: Last‑resort emergency threshold
-
+      front_left_safety: 18.0           # Steer right if left side close
+      front_right_safety: 18.0          # Steer left if right side close
+      critical_stop: 8.0                # <-- NEW: Reverse if closer than this
     dynamic_throttle:
       enable_speed_dampening: True
       dampened_speed_factor: 0.60
 
-    # ---- Reverse parameters (tuneable) ----
-    reverse_params:
-      speed_mps: -0.10                  # m/s (negative = reverse)
-      duration_s: 1.0                   # seconds
-      rear_clearance_threshold_m: 0.15  # meters (15 cm)
+  # ==========================================
+  # 4. SURPRISE TASK & DYNAMIC RULES
+  # ==========================================
+  traffic_light_passing_rules:
+    RED_BLOCK_PASS_SIDE: "RIGHT"
+    GREEN_BLOCK_PASS_SIDE: "LEFT"
+    INVERT_COLORS_MID_RACE: False
 
   # ==========================================
-  # 4. NAVIGATION & SPEED CONTROL (Challenge-Specific)
+  # 5. NAVIGATION & LAP COUNTING
+  # ==========================================
+  navigation_matrix:
+    TOTAL_REQUIRED_LAPS: 3
+    LAP_1_DIRECTION: "CLOCKWISE"
+    LAP_2_DIRECTION: "CLOCKWISE"
+    LAP_3_DIRECTION: "CLOCKWISE"
+
+  # ==========================================
+  # 6. PARKING CONFIGURATION (LIDAR-based)
+  # ==========================================
+  # These values are used by parking_controller.py
+  # They are hardcoded in the code, but you can override them here.
+  parking:
+    rear_wall_target_m: 0.05           # 5 cm from rear wall
+    side_wall_target_m: 0.10           # 10 cm from side wall
+    alignment_tolerance_m: 0.02        # 2 cm tolerance
+    approach_speed_mps: 0.10           # Speed during approach
+    reverse_speed_mps: -0.12           # Speed during reverse
+
+  # ==========================================
+  # 7. STATE MACHINE EXECUTION
+  # ==========================================
+  state_machine:
+    STATE_1_INIT:
+      - Register starting pose $(X_0, Y_0, \theta_0)$ via Lidar.
+      - If Challenge == "OBSTACLE": Register parking slot dimensions.
+      - Reset lap counter to 0.
+
+    STATE_2_NAVIGATE:
+      - Run Host Spatial Tracker (HuskyLens raw bounding box + Lidar fusion).
+      - Check Ultrasonic Emergency Shield:
+          - If Distance < `front_stop`: Reduce speed and steer according to traffic rule.
+          - If Distance < `critical_stop`: Reverse briefly then continue.
+          - If Distance < `front_left_safety` / `front_right_safety`: Steer away.
+      - Maintain persistent map and filter out vision drops/flickers.
+      - Steer vehicle relative to `active_target` (`RED` -> Right, `GREEN` -> Left).
+      - Track lap completion via LIDAR corner detection + odometry fallback.
+
+    STATE_3_TERMINATION:
+      - If Challenge == "OPEN" and Laps == 3:
+          - Target saved `start_pose` and perform smooth deceleration to full stop.
+      - If Challenge == "OBSTACLE" and Laps == 3:
+          - Navigate to saved `parking_slot_geometry` and trigger 4-stage Parallel Parking sequence using LIDAR 360°.
+
+  # ==========================================
+  # NAVIGATION BEHAVIOR (Open & Obstacle Challenges)
   # ==========================================
   navigation:
     # ---- Direction mode (NEW) ----
@@ -191,91 +230,3 @@ system_prompt_matrix:
         distance_slowdown_min_factor: 0.4
         steering_slowdown_max_reduction: 0.4
         lidar_confirm_range_m: 2.5
-
-  # ==========================================
-  # 5. SURPRISE RULE
-  # ==========================================
-  surprise_rule:
-    enabled: True
-    trigger_lap: 2
-    color_to_continue: "GREEN"
-    color_to_reverse: "RED"
-    fallback_direction: "REVERSE"
-    turnaround_speed: 0.1               # m/s during U‑turn
-
-  # ==========================================
-  # 6. LAP COUNTING
-  # ==========================================
-  lap_counting:
-    lap_length_m: 12.0
-    section_fallback_timeout_s: 3.0
-    emergency_lap_margin_m: 0.2
-
-  # ==========================================
-  # 7. VEHICLE PHYSICAL PARAMETERS
-  # ==========================================
-  vehicle:
-    wheelbase_m: 0.25
-    max_speed_mps: 1.5                  # Absolute hard limit (never exceed this)
-    max_steer_rad: 0.524                # 30°
-
-  # ==========================================
-  # 8. MAPPING CONFIGURATION
-  # ==========================================
-  mapping:
-    use_mapping: True
-    save_map_to_disk: True
-    load_map_from_disk: True
-    force_rebuild: False
-
-  # ==========================================
-  # 9. VISION (HuskyLens)
-  # ==========================================
-  vision:
-    color_red_id: 1
-    color_green_id: 2
-
-  # ==========================================
-  # 10. PARKING CONFIGURATION (Emergency Shield during Parking)
-  # ==========================================
-  parking:
-    emergency_shield:
-      enabled: True
-      use_parking_thresholds: True      # If True, use the thresholds below
-      thresholds_cm:
-        front_stop: 8.0                 # Allow closer approach
-        front_left_safety: 10.0         # Less side avoidance during parking
-        front_right_safety: 10.0
-        critical_stop: 4.0              # Allow closer before reversing
-        hard_shield_cm: 3.0             # Last‑resort (still active)
-      dynamic_throttle:
-        enable_speed_dampening: True
-        dampened_speed_factor: 0.60
-      disable_reverse: False            # Set True to prevent reversing during parking
-      disable_hard_steer: False         # Set True to prevent hard steer + crawl
-      disable_hard_shield: False        # Set True to disable the hard shield during parking
-
-  # ==========================================
-  # 11. STATE MACHINE EXECUTION (DESCRIPTIVE)
-  # ==========================================
-  state_machine:
-    STATE_1_INIT:
-      - Register starting pose $(X_0, Y_0, \theta_0)$ via Lidar.
-      - If Challenge == "OBSTACLE": Register parking slot dimensions.
-      - Reset lap counter to 0.
-
-    STATE_2_NAVIGATE:
-      - Run Host Spatial Tracker (HuskyLens raw bounding box + Lidar fusion).
-      - Check Ultrasonic Emergency Shield:
-          - If Distance < `front_stop`: Reduce speed and steer according to traffic rule.
-          - If Distance < `critical_stop`: Reverse briefly then continue.
-          - If Distance < `front_left_safety` / `front_right_safety`: Steer away.
-      - Maintain persistent map and filter out vision drops/flickers.
-      - Steer vehicle relative to `active_target` (`RED` -> Right, `GREEN` -> Left).
-      - Track lap completion via LIDAR corner detection + odometry fallback.
-
-    STATE_3_TERMINATION:
-      - If Challenge == "OPEN" and Laps == 3:
-          - Target saved `start_pose` and perform smooth deceleration to full stop.
-      - If Challenge == "OBSTACLE" and Laps == 3:
-          - Navigate to saved `parking_slot_geometry` and trigger 4-stage Parallel Parking sequence using LIDAR 360°.
