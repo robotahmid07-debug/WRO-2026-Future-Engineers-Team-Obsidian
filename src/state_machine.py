@@ -17,6 +17,9 @@ Integrates:
   - Parking mode activation for emergency shield (during parking).
   - Direct navigation to parking lot using LIDAR‑based localization.
   - All calibratable parameters read from config.
+  - Corridor‑width‑normalised PID (works on 600mm and 1000mm).
+  - Look‑ahead corner braking (uses front LIDAR distance).
+  - Feedforward Ackermann steering (helps at high speed).
 """
 
 import time
@@ -174,6 +177,16 @@ class StateMachine:
         # ---- Dynamic PID dt ----
         self.last_loop_time = time.time()
 
+        # ---- Current speed for look‑ahead braking ----
+        self.current_speed = 0.0
+
+        # ---- Speed control parameters (from YAML) ----
+        self.cruise_speed_mps = config.navigation.cruise_speed_mps
+        self.max_accel = config.navigation.max_accel_mps2
+        self.max_decel = config.navigation.max_decel_mps2
+        self.enable_lookahead_braking = config.navigation.enable_lookahead_braking
+        self.corner_strength_ref = config.navigation.corner_strength_ref
+
         # Give emergency shield access to LIDAR
         self.emergency.set_lidar(self.lidar)
 
@@ -181,6 +194,8 @@ class StateMachine:
         self.spatial_map.confirmation_threshold = self.CONFIRMATION_FRAMES
 
         logger.info(f"StateMachine initialized with challenge: {self.challenge}")
+        logger.info(f"Speed control: cruise={self.cruise_speed_mps}m/s, "
+                    f"accel={self.max_accel}m/s², decel={self.max_decel}m/s²")
 
     # ==========================================================
     # Helper: extract left/right distances from a scan
@@ -207,6 +222,26 @@ class StateMachine:
                 if right_dist is None or dist < right_dist:
                     right_dist = dist
         return left_dist, right_dist
+
+    # ==========================================================
+    # Helper: get front distance (for look‑ahead braking)
+    # ==========================================================
+    def _get_front_distance(self, scan, half_width_deg: float = 10.0) -> Optional[float]:
+        """
+        Get the nearest distance in the front sector (±half_width_deg).
+
+        Returns:
+            Nearest distance in meters, or None if no points.
+        """
+        front_dists = []
+        for ang, dist in scan.items():
+            if dist < 0.05 or dist > 5.0:
+                continue
+            if abs(ang) < half_width_deg:
+                front_dists.append(dist)
+        if not front_dists:
+            return None
+        return min(front_dists)
 
     # ==========================================================
     # Public interface
@@ -244,6 +279,7 @@ class StateMachine:
         self.surprise_rule_activated = False
         self.reverse_end_time = 0.0
         self.last_loop_time = time.time()
+        self.current_speed = 0.0
         if hasattr(self.emergency, 'reset'):
             self.emergency.reset()
         if hasattr(self.parking, 'reset'):
@@ -314,6 +350,9 @@ class StateMachine:
         """
         Compute wall‑following steering using PID with real dt and pre‑fetched scan.
 
+        Error is NORMALISED by corridor width so the same gains work on both
+        600mm and 1000mm corridors (Open Challenge mixes both within one lap).
+
         Args:
             scan: LIDAR scan snapshot (angle → distance).
             dt: Elapsed time since last call (seconds).
@@ -323,7 +362,10 @@ class StateMachine:
         """
         left_dist, right_dist = self._get_left_right_distances(scan)
         if left_dist is not None and right_dist is not None:
-            error = left_dist - right_dist
+            # Normalise error by corridor width
+            corridor_width = max(left_dist + right_dist, 0.30)  # floor to avoid divide-by-zero
+            error = (left_dist - right_dist) / corridor_width  # range ~[-1, 1]
+
             error_derivative = (error - self.prev_pid_error) / dt if dt > 0 else 0.0
 
             # Only update integral if dt is reasonable (avoid windup on long delays)
@@ -336,6 +378,83 @@ class StateMachine:
             self.prev_pid_error = error
             return wall_steer, left_dist, right_dist
         return 0.0, None, None
+
+    def _feedforward_steer(self, scan) -> float:
+        """
+        Compute open‑loop feedforward steering based on estimated path curvature.
+
+        Uses the difference between left and right wall distances to estimate
+        how much the track is curving, and applies an Ackermann‑based feedforward
+        term. This helps the PID react faster at high speed.
+
+        Returns:
+            Feedforward steering angle (radians).
+        """
+        left_dist, right_dist = self._get_left_right_distances(scan)
+        if left_dist is None or right_dist is None:
+            return 0.0
+
+        # Estimate curvature from the difference in side distances
+        # If left > right, track curves right (need to steer right, negative)
+        diff = right_dist - left_dist
+        corridor_width = max(left_dist + right_dist, 0.30)
+        curvature = diff / (corridor_width * corridor_width)  # rough curvature estimate
+
+        # Ackermann feedforward: steer = atan(wheelbase * curvature)
+        ff_steer = math.atan(self.wheelbase * curvature)
+        return max(-0.3, min(0.3, ff_steer))  # clamp to reasonable range
+
+    def _compute_target_speed(self, scan, corner_detected: bool, corner_strength: float) -> float:
+        """
+        Compute target speed with look‑ahead corner braking.
+
+        - Cruise at cruise_speed_mps on straights.
+        - Brake proportionally when front wall/corner is within braking distance.
+        - Reduce speed based on corner strength if corner detected.
+
+        Args:
+            scan: LIDAR scan snapshot.
+            corner_detected: Whether a corner was detected this cycle.
+            corner_strength: Strength of the corner detection (0-1).
+
+        Returns:
+            Target speed in m/s.
+        """
+        base_speed = self.cruise_speed_mps
+
+        # If look‑ahead braking is disabled, use base speed (fallback to existing logic)
+        if not self.enable_lookahead_braking:
+            return base_speed
+
+        front_dist = self._get_front_distance(scan)
+        if front_dist is None or front_dist < 0.05:
+            # No front data or too close – slow down as a safety measure
+            return max(0.3, base_speed * 0.4)
+
+        # ---- Look‑ahead braking ----
+        # Braking distance: v² / (2 * decel)
+        braking_dist = (self.current_speed ** 2) / (2 * max(self.max_decel, 0.1))
+
+        if front_dist < braking_dist * 1.3:
+            # Brake proportionally: the closer the wall, the slower we go
+            speed_factor = max(0.35, front_dist / (braking_dist * 1.3))
+            target = base_speed * speed_factor
+        elif corner_detected:
+            # Scale down proportionally to corner strength
+            severity = min(corner_strength / max(self.corner_strength_ref, 0.01), 1.0)
+            target = base_speed * (1.0 - 0.5 * severity)
+        else:
+            target = base_speed
+
+        # Rate‑limit speed changes to avoid wheel slip
+        max_delta = self.max_accel * 0.05  # 0.05s = loop period estimate
+        if target > self.current_speed:
+            target = min(target, self.current_speed + max_delta)
+        else:
+            target = max(target, self.current_speed - max_delta * 1.5)  # decel can be faster
+
+        # Clamp to reasonable range
+        return max(0.3, min(base_speed * 1.1, target))
 
     def _update_lap_count(self):
         """Update lap count using LIDAR‑based corner detection with odometry fallback."""
@@ -429,6 +548,7 @@ class StateMachine:
         if current_time < self.reverse_end_time:
             linear = self.reverse_speed
             angular = self.reverse_steer
+            self.current_speed = linear
             logger.debug(f"Reversing: speed={linear}, steer={angular}")
         else:
             # ---- Normal navigation ----
@@ -485,6 +605,9 @@ class StateMachine:
 
             # ---- Corner detection ----
             error = 0.0
+            corner_detected = False
+            corner_strength = 0.0
+
             if left_dist is not None and right_dist is not None:
                 error = left_dist - right_dist
 
@@ -514,10 +637,10 @@ class StateMachine:
                         imu_confirmed = (abs(yaw_rate) > self.imu_thresh)
 
                     corner_detected = deriv_trigger or pct_trigger
+                    corner_strength = max(abs(left_delta), abs(right_delta), left_pct, right_pct)
 
                     if corner_detected:
                         if self.use_graded:
-                            corner_strength = max(abs(left_delta), abs(right_delta), left_pct, right_pct)
                             steer_multiplier = min(1.0, corner_strength / 0.5)
                             steer_multiplier = max(0.3, steer_multiplier)
                             if imu_confirmed:
@@ -538,29 +661,37 @@ class StateMachine:
                     self.error_derivative = (error - self.prev_error) / dt
                 self.prev_error = error
 
-            # ---- 2d. Combine traffic light and wall‑following ----
+            # ---- 2d. Compute feedforward steering ----
+            feedforward = self._feedforward_steer(scan)
+
+            # ---- 2e. Combine traffic light, wall‑following, and feedforward ----
             if abs(traffic_angular) > 0.01:
                 raw_angular = traffic_angular
             else:
                 raw_angular = wall_steer
 
-            # ---- 2e. Apply emergency shield corrections ----
+            # Add feedforward (blended 70% PID, 30% feedforward)
+            if abs(feedforward) > 0.01 and abs(traffic_angular) < 0.01:
+                # Only apply feedforward when no traffic light is active
+                raw_angular = 0.7 * raw_angular + 0.3 * feedforward
+
+            # ---- 2f. Apply emergency shield corrections ----
             angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
             throttle = emergency_actions.get('throttle_factor', 1.0)
 
-            # ---- 2f. Speed reduction based on steering intensity ----
+            # ---- 2g. Speed reduction based on steering intensity ----
             steer_intensity = abs(raw_angular)
             steer_factor = 1.0 - (steer_intensity / 0.5) * self.CORNER_SLOWDOWN_MAX
             steer_factor = max(0.6, min(1.0, steer_factor))
 
-            # ---- 2g. Predictive speed control (error derivative) ----
+            # ---- 2h. Predictive speed control (error derivative) ----
             abs_error = abs(error)
             deriv_factor = 1.0 - min(abs(self.error_derivative) / 0.5, 0.4)
             error_factor = 1.0 - min(abs_error / 0.4, 0.3)
             predictive_factor = min(deriv_factor, error_factor)
             predictive_factor = max(0.6, min(1.0, predictive_factor))
 
-            # ---- 2h. Distance‑based slowdown (traffic light) ----
+            # ---- 2i. Distance‑based slowdown (traffic light) ----
             distance_factor = 1.0
             if self.challenge == "obstacle" and dist_to_pillar is not None and dist_to_pillar > 0:
                 if dist_to_pillar < self.tl.distance_slowdown_start_m:
@@ -578,17 +709,31 @@ class StateMachine:
                         raw_angular = wall_steer
                         angular = raw_angular + emergency_actions.get('steer_offset', 0.0)
 
-            # ---- 2i. Straight‑line boost ----
+            # ---- 2j. Straight‑line boost ----
             boost_factor = 1.0
             if abs_error < 0.05 and abs(self.error_derivative) < 0.01:
                 boost_factor = self.STRAIGHT_BOOST
 
-            # ---- 2j. Final speed ----
-            combined_factor = steer_factor * predictive_factor * distance_factor
-            linear = self.BASE_SPEED * throttle * combined_factor * boost_factor
+            # ---- 2k. Look‑ahead braking ----
+            # Compute target speed with look‑ahead braking
+            target_speed = self._compute_target_speed(scan, corner_detected, corner_strength)
+
+            # ---- 2l. Combine all speed factors ----
+            # Blend the existing combined factors with the look‑ahead target
+            combined_factor = steer_factor * predictive_factor * distance_factor * boost_factor
+            linear_from_pid = self.BASE_SPEED * throttle * combined_factor
+            linear_from_lookahead = target_speed * throttle
+
+            # Take the minimum of the two (safety first)
+            linear = min(linear_from_pid, linear_from_lookahead)
+
+            # Clamp to max speed
             linear = min(linear, self.config.vehicle.max_speed_mps)
 
-            # ---- 2k. IMU G‑force limiting ----
+            # Store current speed for next cycle's braking calculation
+            self.current_speed = linear
+
+            # ---- 2m. IMU G‑force limiting ----
             if hasattr(self.localization, 'imu_available') and self.localization.imu_available:
                 yaw_rate = self.localization.latest_imu_yaw_rate
                 if yaw_rate is not None:
@@ -596,9 +741,10 @@ class StateMachine:
                     self.filtered_G = self.G_FILTER_ALPHA * lateral_G + (1 - self.G_FILTER_ALPHA) * self.filtered_G
                     if self.filtered_G > self.MAX_SAFE_G:
                         linear *= self.MAX_SAFE_G / self.filtered_G
+                        self.current_speed = linear
                         logger.debug(f"G‑force limiting: {self.filtered_G:.2f}G -> speed reduced")
 
-            # ---- 2l. Update spatial map with velocity‑compensated pruning ----
+            # ---- 2n. Update spatial map with velocity‑compensated pruning ----
             if detections:
                 self.spatial_map.update(detections, robot_speed=linear, dt=dt)
 
