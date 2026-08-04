@@ -1,9 +1,16 @@
 """
 LIDAR-based 4-Stage Parallel Parking.
 Uses 360° LIDAR for precise distance measurements to rear and side walls.
+Implements LOGIC D, E, F, G for full 15‑point scoring.
+
+LOGIC D – Direction‑aware reverse steer (side chosen by state machine)
+LOGIC E – Fuse ultrasonics + LIDAR in ALIGN stage (ultrasonic < 25 cm)
+LOGIC F – True parallel + inside check with stability counter (8 frames)
+LOGIC G – Marker touch avoidance (ultrasonic < 4 cm → reverse steer)
 """
-# Hi
+
 import time
+import math
 import logging
 from enum import Enum
 from typing import Optional, Dict, Any
@@ -24,11 +31,21 @@ class ParkingStage(Enum):
 class ParkingController:
     def __init__(self, localization, steering_controller, lidar_fusion,
                  config: Dict[str, Any]):
+        """
+        Initialize parking controller.
+
+        Args:
+            localization: Localization object for pose data.
+            steering_controller: SteeringController for motor/servo commands.
+            lidar_fusion: LidarFusion object for LIDAR scans.
+            config: Configuration dict (zone_management or parking section).
+        """
         self.localization = localization
         self.steering = steering_controller
         self.lidar = lidar_fusion
         self.config = config
 
+        # ---- State ----
         self.stage = ParkingStage.IDLE
         self.stage_start_time = 0.0
         self.stage_elapsed = 0.0
@@ -36,36 +53,76 @@ class ParkingController:
         self.parking_geometry: Optional[Dict[str, float]] = None
         self.target_pose = None
 
-        # LIDAR-based parking targets
+        # ---- LIDAR-based parking targets (tune these on the real track) ----
         self.rear_wall_target = 0.05   # 5 cm from rear wall
         self.side_wall_target = 0.10   # 10 cm from side wall
-        self.alignment_tolerance = 0.02
+        self.alignment_tolerance = 0.02  # ±2 cm
 
-        # PID gains for LIDAR-based alignment
+        # ---- PID gains for LIDAR-based alignment ----
         self.kp_rear = 0.5
         self.kp_side = 0.3
 
-        # Stage durations (fallback if LIDAR fails)
+        # ---- Stage durations (fallback if LIDAR fails) ----
         self.stage_durations = {
             ParkingStage.APPROACH: 2.0,
-            ParkingStage.REVERSE_STEER: 2.5,
-            ParkingStage.ALIGN_CENTER: 2.0,
+            ParkingStage.REVERSE_STEER: 3.0,   # extended for direction‑aware reverse
+            ParkingStage.ALIGN_CENTER: 3.0,    # extended for stable check
             ParkingStage.FULL_STOP: 0.5,
         }
 
+        # ---- LOGIC D: reverse steer direction ----
+        self.reverse_steer_offset = 0.35   # positive = left, negative = right
+        self.bay_side = 'left'             # 'left' or 'right' – set by state machine
+
+        # ---- LOGIC F: stability counter ----
+        self.stable_count = 0
+        self.STABLE_FRAMES_REQUIRED = 8    # 8 frames at 50 ms = 0.4 s
+
+        # ---- LOGIC G: touch avoidance ----
+        self.emergency = None   # reference to emergency shield (set via set_emergency_shield)
+
+        logger.info("ParkingController initialized")
+
+    # ==========================================================
+    # LOGIC D: Direction‑aware reverse steer setters
+    # ==========================================================
+
+    def set_reverse_steer_offset(self, offset: float):
+        """Set the reverse steer direction from state machine (LOGIC D)."""
+        self.reverse_steer_offset = offset
+        logger.debug(f"Reverse steer offset set to: {offset:.2f}")
+
+    def set_bay_side(self, side: str):
+        """Set which side the bay is on ('left' or 'right')."""
+        self.bay_side = side
+        logger.debug(f"Bay side set to: {side}")
+
+    def set_emergency_shield(self, emergency):
+        """Give the parking controller access to emergency shield for ultrasonics."""
+        self.emergency = emergency
+        logger.info("Emergency shield reference set for parking controller")
+
+    # ==========================================================
+    # Public interface
+    # ==========================================================
+
     def start(self, parking_geometry: Dict[str, float]):
+        """Start the parking sequence with the given geometry."""
         self.parking_geometry = parking_geometry
         self.stage = ParkingStage.APPROACH
         self.stage_start_time = time.time()
         self.stage_elapsed = 0.0
+        self.stable_count = 0
         logger.info("LIDAR-based parking STARTED")
 
     def abort(self):
+        """Abort parking and stop motors."""
         self.stage = ParkingStage.ABORTED
         self.steering.stop()
         logger.warning("Parking ABORTED")
 
     def update(self) -> ParkingStage:
+        """Run one cycle of the parking state machine. Call at ~20 Hz."""
         if self.stage == ParkingStage.IDLE:
             return self.stage
         if self.stage in (ParkingStage.COMPLETE, ParkingStage.ABORTED):
@@ -84,6 +141,10 @@ class ParkingController:
 
         return self.stage
 
+    # ==========================================================
+    # LIDAR distance helpers
+    # ==========================================================
+
     def _get_rear_distance_from_lidar(self) -> Optional[float]:
         """Get distance to rear wall using LIDAR (180° / -180° sector)."""
         scan = self.lidar.get_scan_snapshot()
@@ -94,7 +155,7 @@ class ParkingController:
         for ang, dist in scan.items():
             if dist < 0.05 or dist > 5.0:
                 continue
-            if abs(abs(ang) - 180) < 15:  # rear sector (±15°)
+            if abs(abs(ang) - 180) < 15:  # rear sector ±15°
                 rear_dists.append(dist)
 
         if not rear_dists:
@@ -119,6 +180,71 @@ class ParkingController:
             return None
         return sum(side_dists) / len(side_dists)
 
+    # ==========================================================
+    # LOGIC E: Ultrasonic access for fusion
+    # ==========================================================
+
+    def _get_ultrasonic_distances(self) -> dict:
+        """
+        Get ultrasonic distances from emergency shield (cm → m).
+        Returns dict with 'front', 'front_left', 'front_right' in meters.
+        """
+        if self.emergency is None:
+            return {
+                'front': float('inf'),
+                'front_left': float('inf'),
+                'front_right': float('inf')
+            }
+
+        return {
+            'front': self.emergency.latest_distances.get('front', float('inf')) / 100.0,
+            'front_left': self.emergency.latest_distances.get('front_left', float('inf')) / 100.0,
+            'front_right': self.emergency.latest_distances.get('front_right', float('inf')) / 100.0,
+        }
+
+    # ==========================================================
+    # LOGIC G: Marker touch avoidance
+    # ==========================================================
+
+    def _check_touch_avoidance(self) -> float:
+        """
+        Check if any front ultrasonic < 4 cm. If so, return a counter‑steer
+        to avoid touching the markers. Returns 0.0 if safe.
+        """
+        us = self._get_ultrasonic_distances()
+        fl = us.get('front_left', 1.0)
+        fr = us.get('front_right', 1.0)
+
+        # If either side is too close, steer away from that side
+        if fl < 0.04 and fr < 0.04:
+            # Both sides too close – steer sharply away from the closest side
+            if fl < fr:
+                return 0.3   # steer right
+            else:
+                return -0.3  # steer left
+        elif fl < 0.04:
+            return 0.3   # steer right (away from left wall)
+        elif fr < 0.04:
+            return -0.3  # steer left (away from right wall)
+
+        return 0.0
+
+    # ==========================================================
+    # LOGIC F: Normalize angle helper
+    # ==========================================================
+
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize angle to [-π, π]."""
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    # ==========================================================
+    # Stage execution
+    # ==========================================================
+
     def _execute_approach(self):
         """Stage 1: Approach parking bay using LIDAR rear distance."""
         rear_dist = self._get_rear_distance_from_lidar()
@@ -131,60 +257,162 @@ class ParkingController:
         self.steering.set_speed(0.10, 0.0)
 
         if self.stage_elapsed > self.stage_durations[ParkingStage.APPROACH]:
+            logger.warning("Parking: APPROACH timeout -> REVERSE_STEER")
             self._transition_to(ParkingStage.REVERSE_STEER)
 
     def _execute_reverse_steer(self):
-        """Stage 2: Reverse with steering into the bay."""
+        """
+        Stage 2: Reverse with steering into the bay.
+        LOGIC D – Direction‑aware reverse steer.
+        LOGIC G – Touch avoidance.
+        """
         rear_dist = self._get_rear_distance_from_lidar()
 
+        # If rear is close, move to align
         if rear_dist is not None and rear_dist < self.rear_wall_target * 1.5:
             self._transition_to(ParkingStage.ALIGN_CENTER)
             logger.info("Parking: REVERSE_STEER complete -> ALIGN_CENTER")
             return
 
+        # ---- LOGIC D: direction‑aware reverse steer ----
+        steer = self.reverse_steer_offset
+
+        # Fine‑tune with LIDAR side distances to avoid walls
         left_dist = self._get_side_distance_from_lidar('left')
         right_dist = self._get_side_distance_from_lidar('right')
 
-        steer_correction = 0.0
-        if left_dist is not None and left_dist < self.side_wall_target:
-            steer_correction = -0.3  # steer right
-        elif right_dist is not None and right_dist < self.side_wall_target:
-            steer_correction = 0.3   # steer left
+        if left_dist is not None and left_dist < self.side_wall_target * 1.2:
+            steer -= 0.15   # steer right (away from left wall)
+        if right_dist is not None and right_dist < self.side_wall_target * 1.2:
+            steer += 0.15   # steer left (away from right wall)
 
-        self.steering.set_speed(-0.12, 0.3 + steer_correction)
+        # ---- LOGIC G: touch avoidance ----
+        touch_steer = self._check_touch_avoidance()
+        if touch_steer != 0.0:
+            logger.warning(f"Touch avoidance active: steer={touch_steer:.2f}")
+            steer = touch_steer  # override with avoidance steer
+
+        # Clamp to safe range
+        steer = max(-0.6, min(0.6, steer))
+
+        self.steering.set_speed(-0.12, steer)
 
         if self.stage_elapsed > self.stage_durations[ParkingStage.REVERSE_STEER]:
+            logger.warning("Parking: REVERSE_STEER timeout -> ALIGN_CENTER")
             self._transition_to(ParkingStage.ALIGN_CENTER)
 
     def _execute_align_center(self):
-        """Stage 3: Fine-tune position using LIDAR."""
-        rear_dist = self._get_rear_distance_from_lidar()
-        left_dist = self._get_side_distance_from_lidar('left')
-        right_dist = self._get_side_distance_from_lidar('right')
+        """
+        Stage 3: Fine-tune position using LIDAR + ultrasonics (LOGIC E).
+        LOGIC F – Check parallel + inside before completing.
+        """
+        # ---- LOGIC E: Fuse LIDAR + ultrasonics ----
+        lidar_rear = self._get_rear_distance_from_lidar()
+        us = self._get_ultrasonic_distances()
 
-        rear_error = (rear_dist - self.rear_wall_target) if rear_dist is not None else 0.0
-        left_error = (left_dist - self.side_wall_target) if left_dist is not None else 0.0
-        right_error = (right_dist - self.side_wall_target) if right_dist is not None else 0.0
+        # Rear: only LIDAR (no rear ultrasonic)
+        rear_dist = lidar_rear if lidar_rear is not None else 0.10
 
-        side_error = (left_error - right_error) / 2 if (left_dist and right_dist) else 0.0
+        # Side: prefer ultrasonics when < 25 cm
+        left_lidar = self._get_side_distance_from_lidar('left')
+        right_lidar = self._get_side_distance_from_lidar('right')
 
+        fl_us = us.get('front_left', 1.0)
+        fr_us = us.get('front_right', 1.0)
+
+        if fl_us < 0.25:
+            left_dist = fl_us
+        else:
+            left_dist = left_lidar if left_lidar is not None else 0.20
+
+        if fr_us < 0.25:
+            right_dist = fr_us
+        else:
+            right_dist = right_lidar if right_lidar is not None else 0.20
+
+        # Compute errors
+        rear_error = rear_dist - self.rear_wall_target
+        left_error = left_dist - self.side_wall_target
+        right_error = right_dist - self.side_wall_target
+        side_error = (left_error - right_error) / 2.0
+
+        # PID corrections
         linear_correction = self.kp_rear * rear_error
         steering_correction = -self.kp_side * side_error
 
         linear_correction = max(-0.05, min(0.05, linear_correction))
         steering_correction = max(-0.2, min(0.2, steering_correction))
 
-        if (abs(rear_error) < self.alignment_tolerance and
-                abs(side_error) < self.alignment_tolerance):
+        # ---- LOGIC G: touch avoidance during alignment ----
+        touch_steer = self._check_touch_avoidance()
+        if touch_steer != 0.0:
+            logger.warning(f"Touch avoidance during align: steer={touch_steer:.2f}")
+            steering_correction = touch_steer  # override with avoidance steer
+
+        # ---- LOGIC F: Check conditions for completion ----
+        rear_ok = abs(rear_error) < self.alignment_tolerance
+        side_ok = abs(side_error) < self.alignment_tolerance
+
+        # Heading parallel to wall
+        geometry = self.parking_geometry
+        heading_parallel = False
+        if geometry:
+            # Wall direction: vector from marker1 to marker2 (along the wall)
+            dx_wall = geometry['x_max'] - geometry['x_min']
+            dy_wall = geometry['y_max'] - geometry['y_min']
+            wall_heading = math.atan2(dy_wall, dx_wall)
+
+            pose = self.localization.get_pose()
+            heading_error = pose.theta - wall_heading
+            heading_error = self._normalize_angle(heading_error)
+
+            # Accept if parallel to wall (0° or 180°)
+            heading_parallel = min(abs(heading_error), abs(heading_error - math.pi)) < 0.12  # ~7°
+
+        # Fully inside rectangle
+        inside = False
+        if geometry:
+            pose = self.localization.get_pose()
+            half_L = 0.15   # half of robot length (tune)
+            half_W = 0.10   # half of robot width
+            cos_t = math.cos(pose.theta)
+            sin_t = math.sin(pose.theta)
+
+            corners = [
+                (pose.x + half_L * cos_t - half_W * sin_t,
+                 pose.y + half_L * sin_t + half_W * cos_t),
+                (pose.x + half_L * cos_t + half_W * sin_t,
+                 pose.y + half_L * sin_t - half_W * cos_t),
+                (pose.x - half_L * cos_t - half_W * sin_t,
+                 pose.y - half_L * sin_t + half_W * cos_t),
+                (pose.x - half_L * cos_t + half_W * sin_t,
+                 pose.y - half_L * sin_t - half_W * cos_t),
+            ]
+
+            inside = all(
+                geometry['x_min'] <= cx <= geometry['x_max'] and
+                geometry['y_min'] <= cy <= geometry['y_max']
+                for cx, cy in corners
+            )
+
+        if rear_ok and side_ok and heading_parallel and inside:
+            self.stable_count += 1
+        else:
+            self.stable_count = 0
+
+        # If stable for enough frames, transition to FULL_STOP
+        if self.stable_count >= self.STABLE_FRAMES_REQUIRED:
             self._transition_to(ParkingStage.FULL_STOP)
-            logger.info("Parking: ALIGN_CENTER complete -> FULL_STOP")
+            logger.info("Parking: ALIGN_CENTER complete (stable) -> FULL_STOP")
             return
 
-        if self.stage_elapsed > self.stage_durations[ParkingStage.ALIGN_CENTER]:
-            self._transition_to(ParkingStage.FULL_STOP)
-            return
-
+        # Apply corrections
         self.steering.set_speed(linear_correction, steering_correction)
+
+        # Fallback timeout
+        if self.stage_elapsed > self.stage_durations[ParkingStage.ALIGN_CENTER]:
+            logger.warning("Parking: ALIGN_CENTER timeout -> FULL_STOP")
+            self._transition_to(ParkingStage.FULL_STOP)
 
     def _execute_full_stop(self):
         """Stage 4: Stop and lock motors."""
@@ -195,9 +423,16 @@ class ParkingController:
             logger.info("Parking COMPLETE!")
 
     def _transition_to(self, new_stage: ParkingStage):
+        """Transition to a new stage and reset timers."""
         self.stage = new_stage
         self.stage_start_time = time.time()
         self.stage_elapsed = 0.0
+        if new_stage == ParkingStage.ALIGN_CENTER:
+            self.stable_count = 0
+
+    # ==========================================================
+    # Status getters
+    # ==========================================================
 
     def is_complete(self) -> bool:
         return self.stage == ParkingStage.COMPLETE
@@ -207,3 +442,12 @@ class ParkingController:
 
     def get_stage(self) -> ParkingStage:
         return self.stage
+
+    def reset(self):
+        """Reset the parking controller to IDLE state."""
+        self.stage = ParkingStage.IDLE
+        self.stage_start_time = 0.0
+        self.stage_elapsed = 0.0
+        self.parking_geometry = None
+        self.stable_count = 0
+        logger.info("ParkingController reset")
