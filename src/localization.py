@@ -157,8 +157,9 @@ class Localization:
 
             # Marker sticks ~20mm proud of flat wall. Check if ALL neighbours are farther.
             # Using 2 neighbours on each side reduces false positives from noise spikes.
-            if (prev1_dist - dist > 0.02 and prev2_dist - dist > 0.02 and
-                next1_dist - dist > 0.02 and next2_dist - dist > 0.02):
+            # Fixed E129: continuation line indented further
+            if (prev1_dist - dist > 0.02 and prev2_dist - dist > 0.02
+                    and next1_dist - dist > 0.02 and next2_dist - dist > 0.02):
 
                 world_ang = robot_pose.theta + math.radians(ang)
                 wx = robot_pose.x + dist * math.cos(world_ang)
