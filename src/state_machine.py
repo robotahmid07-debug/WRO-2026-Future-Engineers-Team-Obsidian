@@ -7,6 +7,9 @@ Integrates all Phase 1 + Phase 2 features plus:
   - Lap‑end geometry refresh (LOGIC B)
   - Live geometry re‑scan during approach (LOGIC C)
   - Direction‑aware reverse steer (uses LOGIC D via parking controller)
+  - Ultrasonic + LIDAR fusion (LOGIC E via parking controller)
+  - True parallel + inside check (LOGIC F via parking controller)
+  - Enhanced touch avoidance (LOGIC G via parking controller)
 """
 
 import time
@@ -251,8 +254,12 @@ class StateMachine:
         geometry = self.localization.scan_for_parking_markers()
         if geometry:
             self.localization.parking_bay_geometry = geometry
-            self.parking.start(geometry)
             logger.info(f"Parking geometry refreshed at lap end: {geometry}")
+            # CRITICAL FIX: Only call parking.start() if we are actually in TERMINATION state
+            # This prevents premature parking stage resets mid-race
+            if self.state == RobotState.TERMINATION:
+                self.parking.start(geometry)
+                logger.info("Parking controller restarted with refreshed geometry")
             self.last_lap_geometry_update = time.time()
 
     # ==========================================================
@@ -406,14 +413,19 @@ class StateMachine:
         return max(0.3, min(base_speed * 1.1, target))
 
     def _update_parking_geometry(self):
-        """Try to update parking geometry using a fresh LIDAR scan."""
+        """Try to update parking geometry using a fresh LIDAR scan.
+           Does NOT call parking.start() unless in TERMINATION state.
+        """
         if self.is_open_challenge:
             return
         geometry = self.localization.scan_for_parking_markers()
         if geometry:
             self.localization.parking_bay_geometry = geometry
             logger.info(f"Parking geometry updated: {geometry}")
-            self.parking.start(geometry)
+            # Only restart parking controller if we are actually in parking mode
+            if self.state == RobotState.TERMINATION:
+                self.parking.start(geometry)
+                logger.info("Parking controller restarted with updated geometry")
             self.last_lap_geometry_update = time.time()
 
     def _update_lap_count(self):
@@ -710,7 +722,9 @@ class StateMachine:
                 if abs(new_spacing - stored_spacing) < 0.15:
                     # Accept new geometry
                     self.localization.parking_bay_geometry = fresh
-                    self.parking.start(fresh)
+                    # Only restart parking controller if in TERMINATION
+                    if self.state == RobotState.TERMINATION:
+                        self.parking.start(fresh)
                     geometry = fresh
                     logger.info(f"Geometry re‑scanned and updated: {fresh}")
                     # Recompute target
