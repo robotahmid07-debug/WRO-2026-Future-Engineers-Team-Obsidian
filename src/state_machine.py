@@ -20,7 +20,9 @@ Integrates:
   - Corridor‑width‑normalised PID (works on 600mm and 1000mm).
   - Look‑ahead corner braking (uses front LIDAR distance).
   - Feedforward Ackermann steering (helps at high speed).
-  - SEARCH_PARKING state for continuous parking marker search.
+  - Per‑lap parking geometry tracking (corrects odometry drift).
+  - Error‑based parking decision: small error → fine‑tune, large error → search.
+  - SEARCH_PARKING state for continuous marker search.
 """
 
 import time
@@ -46,7 +48,7 @@ class RobotState(Enum):
     NAVIGATE = 2
     TERMINATION = 3
     EMERGENCY_STOP = 4
-    SEARCH_PARKING = 5   # NEW: Phase 2 – continuous parking search
+    SEARCH_PARKING = 5   # Phase 2
 
 
 class StateMachine:
@@ -59,6 +61,10 @@ class StateMachine:
     ROI_Y_MAX = 210
     CONFIRMATION_FRAMES = 2
     LIDAR_SECTOR_TOLERANCE = 10.0
+
+    # Parking fine‑tune thresholds (meters)
+    PARKING_FINE_TUNE_THRESHOLD = 0.30   # ≈ 1 foot
+    PARKING_DRIVE_THRESHOLD = 1.0        # if farther than this, drive normally
 
     def __init__(self, config: SystemConfig, serial_bridge, localization: Localization,
                  vision_reader: HuskyLensReader, lidar_fusion: LidarFusion,
@@ -181,6 +187,7 @@ class StateMachine:
         # ---- Phase 2: Search parameters ----
         self.search_start_time = 0.0
         self.search_phase = "FORWARD"  # FORWARD, REVERSE, TURN
+        self.last_lap_geometry_update = 0.0
 
         self.emergency.set_lidar(self.lidar)
         self.spatial_map.confirmation_threshold = self.CONFIRMATION_FRAMES
@@ -255,6 +262,7 @@ class StateMachine:
         self.current_speed = 0.0
         self.search_phase = "FORWARD"
         self.search_start_time = 0.0
+        self.last_lap_geometry_update = 0.0
         if hasattr(self.emergency, 'reset'):
             self.emergency.reset()
         if hasattr(self.parking, 'reset'):
@@ -365,6 +373,18 @@ class StateMachine:
             target = max(target, self.current_speed - max_delta * 1.5)
         return max(0.3, min(base_speed * 1.1, target))
 
+    def _update_parking_geometry(self):
+        """Try to update parking geometry using a fresh LIDAR scan."""
+        if self.is_open_challenge:
+            return
+        geometry = self.localization.scan_for_parking_markers()
+        if geometry:
+            self.localization.parking_bay_geometry = geometry
+            logger.info(f"Parking geometry updated: {geometry}")
+            # Restart parking controller with new geometry
+            self.parking.start(geometry)
+            self.last_lap_geometry_update = time.time()
+
     def _update_lap_count(self):
         pose = self.localization.get_pose()
         if self.lap_start_pose is not None:
@@ -381,6 +401,11 @@ class StateMachine:
             self.lap_start_x = pose.x
             self.distance_since_lap_start = 0.0
             logger.info(f"Lap {self.lap_count} completed")
+
+            # ---- Per‑lap geometry update (Phase 2) ----
+            # Update parking geometry at the start of each lap (except lap 0)
+            if not self.is_open_challenge and self.lap_count >= 1:
+                self._update_parking_geometry()
 
             if (self.lap_count == self.config.surprise_rule.trigger_lap and
                     self.config.surprise_rule.enabled and
@@ -614,6 +639,122 @@ class StateMachine:
         self._update_lap_count()
 
     # ==========================================================
+    # Fine‑tune parking (small error adjustment)
+    # ==========================================================
+
+    def _fine_tune_parking(self):
+        """
+        Perform a small adjustment when the robot is close to the parking spot.
+        This is a gentle reverse/steer to align perfectly.
+        """
+        logger.info("Fine‑tuning parking position (small error correction)")
+
+        # Stop current motion
+        self.steering.stop()
+        time.sleep(0.2)
+
+        # Check current distance to the parking spot using the geometry
+        current_pose = self.localization.get_pose()
+        geometry = self.localization.parking_bay_geometry
+
+        if geometry is None:
+            logger.warning("No geometry for fine‑tune, falling back to search")
+            self.state = RobotState.SEARCH_PARKING
+            return
+
+        # Compute target parking spot centre (average of the two markers)
+        target_x = (geometry['x_min'] + geometry['x_max']) / 2.0
+        target_y = (geometry['y_min'] + geometry['y_max']) / 2.0
+
+        dx = target_x - current_pose.x
+        dy = target_y - current_pose.y
+        distance = math.hypot(dx, dy)
+        target_heading = math.atan2(dy, dx)
+        heading_error = target_heading - current_pose.theta
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+
+        # If already very close, start parking
+        if distance < 0.15 and abs(heading_error) < 0.1:
+            logger.info("Already within fine‑tune tolerance, starting parking")
+            self._start_parking()
+            return
+
+        # Drive slowly toward the target with a small steering correction
+        # Use a very low speed (0.05 m/s) for fine adjustments
+        speed = 0.05 if distance > 0.05 else 0.02
+        steer = 0.3 * heading_error
+        steer = max(-0.3, min(0.3, steer))
+
+        self.steering.set_speed(speed, steer)
+
+        # Allow 1 second for adjustment
+        time.sleep(0.5)
+
+        # Re‑check geometry after adjustment
+        geometry = self.localization.scan_for_parking_markers()
+        if geometry:
+            self.localization.parking_bay_geometry = geometry
+            logger.info(f"Geometry updated during fine‑tune: {geometry}")
+
+        # Now start parking if close enough
+        if distance < 0.3:
+            self._start_parking()
+        else:
+            # If still not close, drive normally
+            logger.info("Fine‑tune failed to get close, resuming drive")
+            self._drive_to_parking()
+
+    # ==========================================================
+    # Drive to parking spot (normal approach)
+    # ==========================================================
+
+    def _drive_to_parking(self):
+        """Drive toward the parking spot using the stored geometry."""
+        current_pose = self.localization.get_pose()
+        geometry = self.localization.parking_bay_geometry
+
+        if geometry is None:
+            logger.warning("No parking geometry, entering search")
+            self.state = RobotState.SEARCH_PARKING
+            return
+
+        # Compute target centre
+        target_x = (geometry['x_min'] + geometry['x_max']) / 2.0
+        target_y = (geometry['y_min'] + geometry['y_max']) / 2.0
+
+        dx = target_x - current_pose.x
+        dy = target_y - current_pose.y
+        distance = math.hypot(dx, dy)
+        target_heading = math.atan2(dy, dx)
+
+        heading_error = target_heading - current_pose.theta
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+
+        # If we're very close, switch to fine‑tune
+        if distance < self.PARKING_FINE_TUNE_THRESHOLD:
+            self._fine_tune_parking()
+            return
+
+        logger.info(f"Driving to parking: distance={distance:.2f}m, heading error={math.degrees(heading_error):.1f}°")
+
+        # Use a small wall‑following steering to help (or simple proportional control)
+        wall_steer, _, _ = self._compute_wall_steer({}, 0.05)
+        steer_correction = 0.5 * heading_error
+        steer_correction = max(-0.3, min(0.3, steer_correction))
+
+        # Blend: 70% heading correction, 30% wall‑following for stability
+        final_steer = 0.7 * steer_correction + 0.3 * wall_steer
+        final_steer = max(-0.4, min(0.4, final_steer))
+
+        # Speed based on distance
+        if distance < 0.8:
+            speed = 0.15
+        else:
+            speed = 0.3
+
+        self.steering.set_speed(speed, final_steer)
+
+    # ==========================================================
     # Phase 2: SEARCH_PARKING State
     # ==========================================================
 
@@ -636,7 +777,7 @@ class StateMachine:
             self.search_phase = "FORWARD"
             logger.info("Search started: moving FORWARD")
 
-        # Scan for markers using the new helper
+        # Scan for markers using the helper
         geometry = self.localization.scan_for_parking_markers()
         if geometry:
             self.localization.parking_bay_geometry = geometry
@@ -660,7 +801,7 @@ class StateMachine:
             if phase_duration > 3.0:
                 self.search_phase = "TURN"
                 self.search_start_time = current_time
-                logger.info("Search phase: TURN (U-turn)")
+                logger.info("Search phase: TURN (U‑turn)")
         elif self.search_phase == "TURN":
             self.steering.set_speed(0.05, 0.4)  # slow U‑turn
             if phase_duration > 4.0:
@@ -673,6 +814,10 @@ class StateMachine:
             logger.error("Search timeout after 60 seconds – stopping")
             self.steering.stop()
             self.state = RobotState.EMERGENCY_STOP
+
+    # ==========================================================
+    # Termination state (handles error‑based decision)
+    # ==========================================================
 
     def _termination_state(self):
         """Handle termination: open challenge stop or obstacle parking with direct navigation."""
@@ -691,47 +836,34 @@ class StateMachine:
             self.search_start_time = 0.0  # reset search timer
             return
 
-        # If we have geometry, navigate to the parking spot and park.
+        # We have geometry – decide what to do based on how far we are from the target
         current_pose = self.localization.get_pose()
-        start_pose = self.localization.get_start_pose()
+        geometry = self.localization.parking_bay_geometry
+        target_x = (geometry['x_min'] + geometry['x_max']) / 2.0
+        target_y = (geometry['y_min'] + geometry['y_max']) / 2.0
 
-        if start_pose is None:
-            logger.error("Start pose not registered – cannot park!")
-            self.steering.stop()
-            return
-
-        dx = start_pose.x - current_pose.x
-        dy = start_pose.y - current_pose.y
+        dx = target_x - current_pose.x
+        dy = target_y - current_pose.y
         distance = math.hypot(dx, dy)
-        target_heading = math.atan2(dy, dx)
 
-        heading_error = target_heading - current_pose.theta
-        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
-
-        if distance < 0.3 and abs(heading_error) < math.pi / 6:
-            logger.info(f"Arrived at parking spot (dist={distance:.2f}m) – starting parking")
-            self._start_parking()
+        # If we are very close (within fine‑tune threshold), do fine adjustments
+        if distance < self.PARKING_FINE_TUNE_THRESHOLD:
+            self._fine_tune_parking()
             return
 
-        logger.info(
-            f"Driving to parking spot (dist={distance:.2f}m, "
-            f"heading error={math.degrees(heading_error):.1f}°)"
-        )
+        # If we are moderately far, drive toward it
+        if distance < self.PARKING_DRIVE_THRESHOLD:
+            self._drive_to_parking()
+            return
 
-        wall_steer, _, _ = self._compute_wall_steer({}, 0.05)
+        # If we are too far (should not happen if geometry is correct), enter search
+        logger.warning(f"Too far from parking spot ({distance:.2f}m), entering search")
+        self.state = RobotState.SEARCH_PARKING
+        self.search_start_time = 0.0
 
-        steer_correction = 0.5 * heading_error
-        steer_correction = max(-0.3, min(0.3, steer_correction))
-
-        final_steer = 0.7 * steer_correction + 0.3 * wall_steer
-        final_steer = max(-0.4, min(0.4, final_steer))
-
-        if distance < 0.8:
-            speed = 0.15
-        else:
-            speed = 0.3
-
-        self.steering.set_speed(speed, final_steer)
+    # ==========================================================
+    # Parking start and emergency stop
+    # ==========================================================
 
     def _start_parking(self):
         """Start the parking sequence."""
