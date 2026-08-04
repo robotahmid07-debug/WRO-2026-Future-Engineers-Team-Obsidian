@@ -3,7 +3,8 @@
 Primary execution entrypoint for WRO Future Engineers 2026.
 Reads hardware switches to select:
   1. Challenge mode (Open / Obstacle) – GPIO 22
-  2. Driving direction (Clockwise / Counter-Clockwise) – GPIO 23
+  2. Driving direction (Clockwise / Counter-Clockwise) – either from GPIO 23
+     or auto‑detected from LIDAR (config‑toggleable).
   3. Start button (GPIO 26) – must be pressed to begin the round
 
 All calibratable parameters are read from config.
@@ -32,6 +33,7 @@ from src.localization import Localization  # noqa: E402
 from src.steering_controller import SteeringController  # noqa: E402
 from src.parking_controller import ParkingController  # noqa: E402
 from src.state_machine import StateMachine  # noqa: E402
+from src.wall_mapper import detect_direction_from_scan  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,21 +73,39 @@ def main():
         challenge = "open"
         logger.info("Hardware switch: OPEN challenge (stop at start)")
 
-    # ---- 2b. Direction switch (GPIO 23) ----
-    GPIO.setup(PiPins.DIRECTION_SELECT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    if GPIO.input(PiPins.DIRECTION_SELECT) == GPIO.LOW:
-        initial_direction = "COUNTER_CLOCKWISE"
-        logger.info("Direction switch: COUNTER-CLOCKWISE")
-    else:
-        initial_direction = "CLOCKWISE"
-        logger.info("Direction switch: CLOCKWISE")
+    # ---- 2b. LIDAR initialization (moved earlier for auto‑direction) ----
+    lidar = LidarFusion(port='/dev/ttyUSB1')
+    lidar.open()
+    logger.info("LIDAR initialized")
 
-    # ---- 2c. Start button (GPIO 26) ----
+    # ---- 2c. Direction: switch (manual) or auto (LIDAR‑based) ----
+    direction_mode = config.navigation.direction_mode
+
+    if direction_mode == "auto":
+        logger.info("Direction mode: AUTO (LIDAR‑based detection)")
+        initial_scan = lidar.get_scan_snapshot()
+        initial_direction = detect_direction_from_scan(
+            initial_scan,
+            window_deg=config.navigation.auto_direction_scan_window_deg,
+            min_confidence_m=config.navigation.auto_direction_min_confidence_m,
+        )
+        logger.info(f"Auto‑detected direction: {initial_direction}")
+    else:
+        logger.info("Direction mode: SWITCH (manual override)")
+        GPIO.setup(PiPins.DIRECTION_SELECT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        if GPIO.input(PiPins.DIRECTION_SELECT) == GPIO.LOW:
+            initial_direction = "COUNTER_CLOCKWISE"
+            logger.info("Direction switch: COUNTER‑CLOCKWISE")
+        else:
+            initial_direction = "CLOCKWISE"
+            logger.info("Direction switch: CLOCKWISE")
+
+    # ---- 2d. Start button (GPIO 26) ----
     START_BUTTON_PIN = 26   # Physical pin 37
     GPIO.setup(START_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
     # ------------------------------------------------------------------
-    # 3. Initialize hardware interfaces
+    # 3. Initialize remaining hardware interfaces
     # ------------------------------------------------------------------
     # Serial bridge (Pi <-> ESP32)
     serial_bridge = SerialBridge(port='/dev/ttyAMA0', baudrate=460800)
@@ -99,11 +119,6 @@ def main():
         # Continue anyway – vision is critical, but we don't exit to allow debugging.
     else:
         logger.info("HuskyLens V2 initialized")
-
-    # LIDAR
-    lidar = LidarFusion(port='/dev/ttyUSB1')
-    lidar.open()
-    logger.info("LIDAR initialized")
 
     # Spatial map for object tracking
     spatial_config = config.sensor_fusion_and_tracking.host_spatial_tracker
