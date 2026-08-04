@@ -8,6 +8,12 @@ Reads hardware switches to select:
   3. Start button (GPIO 26) – must be pressed to begin the round
 
 All calibratable parameters are read from config.
+
+Hardware interfaces:
+  - LIDAR: RPLIDAR A1 on /dev/ttyUSB1
+  - HuskyLens V2 on I2C bus 1
+  - ESP32-S3 on /dev/ttyAMA0 (UART)
+  - GPIO switches for mode, direction, start
 """
 
 import sys
@@ -46,6 +52,7 @@ running = True
 
 
 def signal_handler(sig, frame):
+    """Handle SIGINT and SIGTERM for graceful shutdown."""
     global running
     logger.info("Caught interrupt signal, shutting down...")
     running = False
@@ -76,7 +83,7 @@ def main():
     # ---- 2b. LIDAR initialization (moved earlier for auto‑direction) ----
     lidar = LidarFusion(port='/dev/ttyUSB1')
     lidar.open()
-    logger.info("LIDAR initialized")
+    logger.info("LIDAR initialized on /dev/ttyUSB1")
 
     # ---- 2c. Direction: switch (manual) or auto (LIDAR‑based) ----
     direction_mode = config.navigation.direction_mode
@@ -107,20 +114,20 @@ def main():
     # ------------------------------------------------------------------
     # 3. Initialize remaining hardware interfaces
     # ------------------------------------------------------------------
-    # Serial bridge (Pi <-> ESP32)
+    # ---- 3a. Serial bridge (Pi <-> ESP32) ----
     serial_bridge = SerialBridge(port='/dev/ttyAMA0', baudrate=460800)
-    # serial_bridge.open()   # <-- REMOVED: port already opened in __init__
-    logger.info("Serial bridge opened")
+    # The port is already opened in __init__, so no need for .open()
+    logger.info("Serial bridge opened on /dev/ttyAMA0 at 460800 baud")
 
-    # HuskyLens V2 on I2C bus 1
+    # ---- 3b. HuskyLens V2 on I2C bus 1 ----
     vision = HuskyLensReader(i2c_bus=1, poll_interval=0.05)
     if not vision.open():
         logger.error("Failed to initialize HuskyLens V2. Check I2C connection.")
         # Continue anyway – vision is critical, but we don't exit to allow debugging.
     else:
-        logger.info("HuskyLens V2 initialized")
+        logger.info("HuskyLens V2 initialized on I2C bus 1")
 
-    # Spatial map for object tracking
+    # ---- 3c. Spatial map for object tracking ----
     spatial_config = config.sensor_fusion_and_tracking.host_spatial_tracker
     spatial_map = SpatialMap(spatial_config)
     logger.info("Spatial map initialized")
@@ -187,9 +194,9 @@ def main():
     # ------------------------------------------------------------------
     parking = ParkingController(localization, steering, lidar, config.zone_management)
 
-    # ---- NEW: Pass emergency shield reference to parking controller ----
+    # ---- IMPORTANT: Pass emergency shield reference to parking controller ----
+    # This enables LOGIC E (ultrasonic + LIDAR fusion) and LOGIC G (touch avoidance)
     parking.set_emergency_shield(emergency)
-
     logger.info("Parking controller initialized with emergency shield reference")
 
     # ------------------------------------------------------------------
