@@ -6,7 +6,7 @@ Implements LOGIC D, E, F, G for full 15‑point scoring.
 LOGIC D – Direction‑aware reverse steer (side chosen by state machine)
 LOGIC E – Fuse ultrasonics + LIDAR in ALIGN stage (ultrasonic < 25 cm)
 LOGIC F – True parallel + inside check with stability counter (8 frames)
-LOGIC G – Marker touch avoidance (ultrasonic < 4 cm → reverse steer)
+LOGIC G – Enhanced touch avoidance with forward escape (slow opposite linear + steer)
 """
 
 import time
@@ -78,8 +78,13 @@ class ParkingController:
         self.stable_count = 0
         self.STABLE_FRAMES_REQUIRED = 8    # 8 frames at 50 ms = 0.4 s
 
-        # ---- LOGIC G: touch avoidance ----
-        self.emergency = None   # reference to emergency shield (set via set_emergency_shield)
+        # ---- LOGIC G: Enhanced touch avoidance ----
+        self.emergency = None              # reference to emergency shield (set via set_emergency_shield)
+        self.touch_escape_active = False
+        self.touch_escape_start_time = 0.0
+        self.TOUCH_ESCAPE_DURATION = 0.5   # seconds to crawl forward
+        self.TOUCH_ESCAPE_SPEED = 0.05     # m/s forward during escape
+        self.TOUCH_CLEAR_THRESHOLD = 0.06  # 6 cm = clear
 
         logger.info("ParkingController initialized")
 
@@ -98,7 +103,10 @@ class ParkingController:
         logger.debug(f"Bay side set to: {side}")
 
     def set_emergency_shield(self, emergency):
-        """Give the parking controller access to emergency shield for ultrasonics."""
+        """
+        Give the parking controller access to emergency shield for ultrasonics.
+        Called from main.py before any parking stage runs.
+        """
         self.emergency = emergency
         logger.info("Emergency shield reference set for parking controller")
 
@@ -113,12 +121,14 @@ class ParkingController:
         self.stage_start_time = time.time()
         self.stage_elapsed = 0.0
         self.stable_count = 0
+        self.touch_escape_active = False
         logger.info("LIDAR-based parking STARTED")
 
     def abort(self):
         """Abort parking and stop motors."""
         self.stage = ParkingStage.ABORTED
         self.steering.stop()
+        self.touch_escape_active = False
         logger.warning("Parking ABORTED")
 
     def update(self) -> ParkingStage:
@@ -129,6 +139,10 @@ class ParkingController:
             return self.stage
 
         self.stage_elapsed = time.time() - self.stage_start_time
+
+        # ---- Check if emergency shield is set ----
+        if self.emergency is None:
+            logger.warning("Parking: emergency shield not set – ultrasonic fusion disabled")
 
         if self.stage == ParkingStage.APPROACH:
             self._execute_approach()
@@ -203,31 +217,52 @@ class ParkingController:
         }
 
     # ==========================================================
-    # LOGIC G: Marker touch avoidance
+    # LOGIC G: Enhanced touch avoidance with forward escape
     # ==========================================================
 
-    def _check_touch_avoidance(self) -> float:
+    def _check_touch_avoidance(self) -> tuple:
         """
-        Check if any front ultrasonic < 4 cm. If so, return a counter‑steer
-        to avoid touching the markers. Returns 0.0 if safe.
+        Enhanced LOGIC G: Check if any front ultrasonic < 4 cm.
+        If triggered, do a short forward crawl with opposite steer.
+        Returns (should_escape, steer_direction)
         """
         us = self._get_ultrasonic_distances()
         fl = us.get('front_left', 1.0)
         fr = us.get('front_right', 1.0)
 
-        # If either side is too close, steer away from that side
-        if fl < 0.04 and fr < 0.04:
-            # Both sides too close – steer sharply away from the closest side
-            if fl < fr:
-                return 0.3   # steer right
-            else:
-                return -0.3  # steer left
-        elif fl < 0.04:
-            return 0.3   # steer right (away from left wall)
-        elif fr < 0.04:
-            return -0.3  # steer left (away from right wall)
+        # If already in escape, check if clear
+        if self.touch_escape_active:
+            # Check elapsed time
+            elapsed = time.time() - self.touch_escape_start_time
+            if elapsed > self.TOUCH_ESCAPE_DURATION:
+                self.touch_escape_active = False
+                logger.info("Touch escape: duration complete, resuming normal stage")
+                return False, 0.0
 
-        return 0.0
+            # Also clear if both sensors > clear threshold (6 cm)
+            if fl > self.TOUCH_CLEAR_THRESHOLD and fr > self.TOUCH_CLEAR_THRESHOLD:
+                self.touch_escape_active = False
+                logger.info("Touch escape: clear, resuming normal stage")
+                return False, 0.0
+
+            # Still in escape – continue moving forward with steer away
+            if fl < fr:
+                return True, 0.3   # steer right (away from left wall)
+            else:
+                return True, -0.3  # steer left (away from right wall)
+
+        # Check if we need to trigger escape (any sensor < 4 cm)
+        if fl < 0.04 or fr < 0.04:
+            self.touch_escape_active = True
+            self.touch_escape_start_time = time.time()
+            logger.warning(f"Touch escape triggered! fl={fl:.3f}, fr={fr:.3f}")
+            # Steer away from the closest side
+            if fl < fr:
+                return True, 0.3   # steer right (away from left wall)
+            else:
+                return True, -0.3  # steer left (away from right wall)
+
+        return False, 0.0
 
     # ==========================================================
     # LOGIC F: Normalize angle helper
@@ -264,8 +299,15 @@ class ParkingController:
         """
         Stage 2: Reverse with steering into the bay.
         LOGIC D – Direction‑aware reverse steer.
-        LOGIC G – Touch avoidance.
+        LOGIC G – Touch avoidance with forward escape.
         """
+        # ---- LOGIC G: Enhanced touch avoidance (escape) ----
+        should_escape, steer_escape = self._check_touch_avoidance()
+        if should_escape:
+            # Move forward slowly + steer away (counter-direction)
+            self.steering.set_speed(self.TOUCH_ESCAPE_SPEED, steer_escape)
+            return  # Stay in this stage until escape complete
+
         rear_dist = self._get_rear_distance_from_lidar()
 
         # If rear is close, move to align
@@ -286,12 +328,6 @@ class ParkingController:
         if right_dist is not None and right_dist < self.side_wall_target * 1.2:
             steer += 0.15   # steer left (away from right wall)
 
-        # ---- LOGIC G: touch avoidance ----
-        touch_steer = self._check_touch_avoidance()
-        if touch_steer != 0.0:
-            logger.warning(f"Touch avoidance active: steer={touch_steer:.2f}")
-            steer = touch_steer  # override with avoidance steer
-
         # Clamp to safe range
         steer = max(-0.6, min(0.6, steer))
 
@@ -305,7 +341,14 @@ class ParkingController:
         """
         Stage 3: Fine-tune position using LIDAR + ultrasonics (LOGIC E).
         LOGIC F – Check parallel + inside before completing.
+        LOGIC G – Touch avoidance during alignment.
         """
+        # ---- LOGIC G: Touch avoidance during alignment ----
+        should_escape, steer_escape = self._check_touch_avoidance()
+        if should_escape:
+            self.steering.set_speed(self.TOUCH_ESCAPE_SPEED, steer_escape)
+            return  # Stay in this stage until escape complete
+
         # ---- LOGIC E: Fuse LIDAR + ultrasonics ----
         lidar_rear = self._get_rear_distance_from_lidar()
         us = self._get_ultrasonic_distances()
@@ -342,12 +385,6 @@ class ParkingController:
 
         linear_correction = max(-0.05, min(0.05, linear_correction))
         steering_correction = max(-0.2, min(0.2, steering_correction))
-
-        # ---- LOGIC G: touch avoidance during alignment ----
-        touch_steer = self._check_touch_avoidance()
-        if touch_steer != 0.0:
-            logger.warning(f"Touch avoidance during align: steer={touch_steer:.2f}")
-            steering_correction = touch_steer  # override with avoidance steer
 
         # ---- LOGIC F: Check conditions for completion ----
         rear_ok = abs(rear_error) < self.alignment_tolerance
@@ -429,6 +466,8 @@ class ParkingController:
         self.stage_elapsed = 0.0
         if new_stage == ParkingStage.ALIGN_CENTER:
             self.stable_count = 0
+        # Reset touch escape when transitioning
+        self.touch_escape_active = False
 
     # ==========================================================
     # Status getters
@@ -450,4 +489,5 @@ class ParkingController:
         self.stage_elapsed = 0.0
         self.parking_geometry = None
         self.stable_count = 0
+        self.touch_escape_active = False
         logger.info("ParkingController reset")
