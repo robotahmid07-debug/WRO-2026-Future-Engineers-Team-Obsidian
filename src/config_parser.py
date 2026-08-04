@@ -5,8 +5,9 @@ Includes all new sections:
   - PID, corner detection, G-force, traffic light parameters
   - Parking-specific emergency shield thresholds
   - Feature toggles for reverse, hard shield, rear check, etc.
+  - Direction mode (switch/auto) and speed control parameters
 """
-# Hi
+
 import yaml
 from dataclasses import dataclass
 from typing import List, Dict, Any
@@ -164,6 +165,16 @@ class ObstacleChallengeParams:
 class NavigationBehavior:
     open_challenge: OpenChallengeParams
     obstacle_challenge: ObstacleChallengeParams
+    # ---- Direction mode ----
+    direction_mode: str = "switch"              # "switch" or "auto"
+    auto_direction_scan_window_deg: float = 60.0
+    auto_direction_min_confidence_m: float = 0.15
+    # ---- Speed control (Section E) ----
+    cruise_speed_mps: float = 1.7               # target speed on straights
+    max_accel_mps2: float = 2.5                 # max acceleration (m/s²)
+    max_decel_mps2: float = 3.5                 # max deceleration for braking (m/s²)
+    enable_lookahead_braking: bool = True       # toggle look‑ahead corner braking
+    corner_strength_ref: float = 0.35           # reference corner strength for scaling
 
 
 # ============================================================
@@ -332,8 +343,20 @@ def load_config(yaml_path: str) -> SystemConfig:
     obstacle_params = parse_challenge_params(
         nav.get('obstacle_challenge', {}), is_obstacle=True
     )
-    navigation = NavigationBehavior(open_challenge=open_params,
-                                    obstacle_challenge=obstacle_params)
+
+    # ---- NavigationBehavior with new fields ----
+    navigation = NavigationBehavior(
+        open_challenge=open_params,
+        obstacle_challenge=obstacle_params,
+        direction_mode=nav.get('direction_mode', 'switch'),
+        auto_direction_scan_window_deg=nav.get('auto_direction_scan_window_deg', 60.0),
+        auto_direction_min_confidence_m=nav.get('auto_direction_min_confidence_m', 0.15),
+        cruise_speed_mps=nav.get('cruise_speed_mps', 1.7),
+        max_accel_mps2=nav.get('max_accel_mps2', 2.5),
+        max_decel_mps2=nav.get('max_decel_mps2', 3.5),
+        enable_lookahead_braking=nav.get('enable_lookahead_braking', True),
+        corner_strength_ref=nav.get('corner_strength_ref', 0.35),
+    )
 
     # ---- Parking ----
     park = sm.get('parking', {})
