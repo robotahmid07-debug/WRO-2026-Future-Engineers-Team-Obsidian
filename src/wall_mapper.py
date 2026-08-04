@@ -226,7 +226,11 @@ class WallMapper:
 # NEW FUNCTION: Autonomous Direction Detection (Section C)
 # ================================================================
 
-def detect_direction_from_scan(lidar_scan: Dict[float, float], window_deg: float = 60.0, min_confidence_m: float = 0.15) -> str:
+def detect_direction_from_scan(
+    lidar_scan: Dict[float, float],
+    window_deg: float = 60.0,
+    min_confidence_m: float = 0.15
+) -> str:
     """
     Infer CLOCKWISE / COUNTER_CLOCKWISE from a single stationary LIDAR scan
     taken at the start line, before any movement. Whichever lateral side
