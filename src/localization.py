@@ -109,86 +109,97 @@ class Localization:
         logger.info("Start pose registered at (0, 0, 0)")
 
     # ==========================================================
-    # PARKING DETECTION – REPLACED WITH LIDAR-BASED DETECTION
+    # PARKING DETECTION – REFACTORED FOR PHASE 2
     # ==========================================================
+
+    def scan_for_parking_markers(self) -> Optional[dict]:
+        """
+        Perform a single LIDAR scan and detect the two magenta parking-lot
+        boundary markers (200x20x100mm each, WRO rule 13.25).
+
+        Returns:
+            Dictionary with 'x_min', 'x_max', 'y_min', 'y_max' in world coords,
+            or None if markers were not found in this scan.
+
+        Thresholds are tuned for RPLIDAR A1 (1 point/deg, ~10-15mm noise floor).
+        """
+        robot_pose = self.current_pose
+        scan = self.lidar.get_scan_snapshot()  # Dict[angle_deg, distance_m]
+
+        if not scan:
+            return None
+
+        sorted_pts = sorted(scan.items())
+        n = len(sorted_pts)
+        candidates = []
+
+        for i in range(1, n - 1):
+            ang, dist = sorted_pts[i]
+            if dist <= 0.02 or dist > 2.5:
+                continue
+            prev_dist = sorted_pts[i - 1][1]
+            next_dist = sorted_pts[i + 1][1]
+            # Marker sticks ~20mm proud of flat wall. Threshold 0.02m clears A1 noise.
+            if (prev_dist - dist > 0.02) and (next_dist - dist > 0.02):
+                world_ang = robot_pose.theta + math.radians(ang)
+                wx = robot_pose.x + dist * math.cos(world_ang)
+                wy = robot_pose.y + dist * math.sin(world_ang)
+                candidates.append((wx, wy))
+
+        clusters: List[List[Tuple[float, float]]] = []
+        for pt in candidates:
+            placed = False
+            for cluster in clusters:
+                cx = sum(p[0] for p in cluster) / len(cluster)
+                cy = sum(p[1] for p in cluster) / len(cluster)
+                if math.hypot(pt[0] - cx, pt[1] - cy) < 0.05:
+                    cluster.append(pt)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([pt])
+
+        # A1's lower point density: we only need 2 points per cluster.
+        clusters = [c for c in clusters if len(c) >= 2]
+
+        if len(clusters) < 2:
+            return None
+
+        clusters.sort(key=len, reverse=True)
+        m1, m2 = clusters[0], clusters[1]
+        c1 = (sum(p[0] for p in m1) / len(m1), sum(p[1] for p in m1) / len(m1))
+        c2 = (sum(p[0] for p in m2) / len(m2), sum(p[1] for p in m2) / len(m2))
+
+        spacing = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+        if not (0.15 < spacing < 2.0):  # sane physical bounds
+            return None
+
+        x_min, x_max = sorted([c1[0], c2[0]])
+        y_min, y_max = sorted([c1[1], c2[1]])
+
+        return {
+            'x_min': x_min, 'x_max': x_max,
+            'y_min': y_min, 'y_max': y_max,
+        }
 
     def register_parking_slot(self) -> None:
         """
-        Detect the two magenta parking-lot boundary markers (200x20x100mm each,
-        WRO rule 13.25) from LIDAR and compute the real parking-bay rectangle
-        in world coordinates. Replaces the previous hardcoded-box stub.
-
-        Called from state_machine._init_state() before the robot moves. The
-        parking lot is guaranteed to be in the starting section (WRO rule 8,
-        obstacle challenge step 4), so a scan taken from the start pose sees it.
-
-        Thresholds are tuned for RPLIDAR A1 (1 point/deg, ~10-15mm noise floor,
-        5.5-10 Hz rotation speed).
+        Attempt to detect parking markers with up to 5 retries (100ms apart).
+        Stores result in self.parking_bay_geometry or leaves as None.
         """
-        robot_pose = self.current_pose  # already at/near origin at this point
-
-        for attempt in range(5):  # 100ms apart = ~500ms total, matches A1 rotation speed
-            scan = self.lidar.get_scan_snapshot()  # Dict[angle_deg, distance_m]
-            if not scan:
-                time.sleep(0.10)
-                continue
-
-            sorted_pts = sorted(scan.items())
-            n = len(sorted_pts)
-            candidates = []
-            for i in range(1, n - 1):
-                ang, dist = sorted_pts[i]
-                if dist <= 0.02 or dist > 2.5:
-                    continue
-                prev_dist = sorted_pts[i - 1][1]
-                next_dist = sorted_pts[i + 1][1]
-                # A marker sticks ~20mm proud of the flat wall behind it. Threshold
-                # set to 0.02m to clear the A1's ~10-15mm range noise floor while
-                # staying well under the marker's actual protrusion.
-                if (prev_dist - dist > 0.02) and (next_dist - dist > 0.02):
-                    world_ang = robot_pose.theta + math.radians(ang)
-                    wx = robot_pose.x + dist * math.cos(world_ang)
-                    wy = robot_pose.y + dist * math.sin(world_ang)
-                    candidates.append((wx, wy))
-
-            clusters: List[List[Tuple[float, float]]] = []
-            for pt in candidates:
-                placed = False
-                for cluster in clusters:
-                    cx = sum(p[0] for p in cluster) / len(cluster)
-                    cy = sum(p[1] for p in cluster) / len(cluster)
-                    if math.hypot(pt[0] - cx, pt[1] - cy) < 0.05:
-                        cluster.append(pt)
-                        placed = True
-                        break
-                if not placed:
-                    clusters.append([pt])
-            clusters = [c for c in clusters if len(c) >= 2]  # A1's lower point density
-
-            if len(clusters) >= 2:
-                clusters.sort(key=len, reverse=True)
-                m1, m2 = clusters[0], clusters[1]
-                c1 = (sum(p[0] for p in m1) / len(m1), sum(p[1] for p in m1) / len(m1))
-                c2 = (sum(p[0] for p in m2) / len(m2), sum(p[1] for p in m2) / len(m2))
-                spacing = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-                if 0.15 < spacing < 2.0:  # sane physical bounds on parking-lot length
-                    x_min, x_max = sorted([c1[0], c2[0]])
-                    y_min, y_max = sorted([c1[1], c2[1]])
-                    self.parking_bay_geometry = {
-                        'x_min': x_min, 'x_max': x_max,
-                        'y_min': y_min, 'y_max': y_max,
-                    }
-                    logger.info(
-                        f"Parking bay geometry measured from LIDAR "
-                        f"(attempt {attempt + 1}): {self.parking_bay_geometry}"
-                    )
-                    return
-
+        for attempt in range(5):
+            geometry = self.scan_for_parking_markers()
+            if geometry:
+                self.parking_bay_geometry = geometry
+                logger.info(
+                    f"Parking bay geometry measured (attempt {attempt + 1}): {geometry}"
+                )
+                return
             time.sleep(0.10)
 
         logger.warning(
             "Parking bay markers not found after 5 LIDAR scans; "
-            "parking_bay_geometry left as None (parking state will not activate)."
+            "parking_bay_geometry left as None."
         )
         self.parking_bay_geometry = None
 
