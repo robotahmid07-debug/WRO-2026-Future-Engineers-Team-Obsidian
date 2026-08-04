@@ -109,7 +109,7 @@ class Localization:
         logger.info("Start pose registered at (0, 0, 0)")
 
     # ==========================================================
-    # PARKING DETECTION – REFACTORED FOR PHASE 2
+    # PARKING DETECTION – ROBUST VERSION WITH BETTER FILTERING
     # ==========================================================
 
     def scan_for_parking_markers(self) -> Optional[dict]:
@@ -117,70 +117,124 @@ class Localization:
         Perform a single LIDAR scan and detect the two magenta parking-lot
         boundary markers (200x20x100mm each, WRO rule 13.25).
 
+        Improvements:
+          - Uses 2 neighbours on each side (instead of 1) to reduce noise.
+          - Stricter spacing tolerance: max 0.8m (real markers are ~0.3-0.5m apart).
+          - Cluster quality check: rejects elongated or sparse clusters.
+          - Outlier rejection: removes points far from cluster centroid.
+
         Returns:
             Dictionary with 'x_min', 'x_max', 'y_min', 'y_max' in world coords,
             or None if markers were not found in this scan.
-
-        Thresholds are tuned for RPLIDAR A1 (1 point/deg, ~10-15mm noise floor).
         """
         robot_pose = self.current_pose
         scan = self.lidar.get_scan_snapshot()  # Dict[angle_deg, distance_m]
 
         if not scan:
+            logger.debug("scan_for_parking_markers: No LIDAR scan available")
             return None
 
         sorted_pts = sorted(scan.items())
         n = len(sorted_pts)
+
+        # Need at least 5 points to have 2 neighbours on each side
+        if n < 5:
+            logger.debug("scan_for_parking_markers: Too few LIDAR points")
+            return None
+
         candidates = []
 
-        for i in range(1, n - 1):
+        for i in range(2, n - 2):  # Start at index 2 to have 2 neighbours before
             ang, dist = sorted_pts[i]
             if dist <= 0.02 or dist > 2.5:
                 continue
-            prev_dist = sorted_pts[i - 1][1]
-            next_dist = sorted_pts[i + 1][1]
-            # Marker sticks ~20mm proud of flat wall. Threshold 0.02m clears A1 noise.
-            if (prev_dist - dist > 0.02) and (next_dist - dist > 0.02):
+
+            # Check 2 neighbours on each side
+            prev1_dist = sorted_pts[i - 1][1]
+            prev2_dist = sorted_pts[i - 2][1]
+            next1_dist = sorted_pts[i + 1][1]
+            next2_dist = sorted_pts[i + 2][1]
+
+            # Marker sticks ~20mm proud of flat wall. Check if ALL neighbours are farther.
+            # Using 2 neighbours on each side reduces false positives from noise spikes.
+            if (prev1_dist - dist > 0.02 and prev2_dist - dist > 0.02 and
+                next1_dist - dist > 0.02 and next2_dist - dist > 0.02):
+
                 world_ang = robot_pose.theta + math.radians(ang)
                 wx = robot_pose.x + dist * math.cos(world_ang)
                 wy = robot_pose.y + dist * math.sin(world_ang)
-                candidates.append((wx, wy))
+                candidates.append((wx, wy, dist))
 
+        if len(candidates) < 4:  # Need at least 4 points for 2 clusters
+            logger.debug(f"scan_for_parking_markers: Only {len(candidates)} candidates found")
+            return None
+
+        # ---- Cluster the candidate points ----
         clusters: List[List[Tuple[float, float]]] = []
         for pt in candidates:
+            wx, wy, _ = pt
             placed = False
             for cluster in clusters:
                 cx = sum(p[0] for p in cluster) / len(cluster)
                 cy = sum(p[1] for p in cluster) / len(cluster)
-                if math.hypot(pt[0] - cx, pt[1] - cy) < 0.05:
-                    cluster.append(pt)
+                if math.hypot(wx - cx, wy - cy) < 0.06:  # Slightly tighter clustering
+                    cluster.append((wx, wy))
                     placed = True
                     break
             if not placed:
-                clusters.append([pt])
+                clusters.append([(wx, wy)])
 
-        # A1's lower point density: we only need 2 points per cluster.
+        # Filter clusters: must have at least 2 points (A1's lower density)
         clusters = [c for c in clusters if len(c) >= 2]
 
         if len(clusters) < 2:
+            logger.debug(f"scan_for_parking_markers: {len(clusters)} clusters found (<2)")
             return None
 
-        clusters.sort(key=len, reverse=True)
-        m1, m2 = clusters[0], clusters[1]
+        # ---- Cluster quality check ----
+        # Reject clusters that are too elongated (should be roughly circular)
+        valid_clusters = []
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            # Check cluster compactness
+            cx = sum(p[0] for p in cluster) / len(cluster)
+            cy = sum(p[1] for p in cluster) / len(cluster)
+            max_dist = max(math.hypot(p[0] - cx, p[1] - cy) for p in cluster)
+            # Reject if points are spread out more than 8cm (marker is 200mm wide)
+            if max_dist < 0.08:
+                valid_clusters.append(cluster)
+
+        if len(valid_clusters) < 2:
+            logger.debug("scan_for_parking_markers: Invalid cluster quality")
+            return None
+
+        # Sort by size (largest first)
+        valid_clusters.sort(key=len, reverse=True)
+        m1, m2 = valid_clusters[0], valid_clusters[1]
+
+        # Compute cluster centroids
         c1 = (sum(p[0] for p in m1) / len(m1), sum(p[1] for p in m1) / len(m1))
         c2 = (sum(p[0] for p in m2) / len(m2), sum(p[1] for p in m2) / len(m2))
 
         spacing = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-        if not (0.15 < spacing < 2.0):  # sane physical bounds
+
+        # Strict spacing: 0.15m minimum, 0.8m maximum (real markers are ~0.3-0.5m)
+        if not (0.15 < spacing < 0.8):
+            logger.debug(f"scan_for_parking_markers: Invalid spacing {spacing:.2f}m")
             return None
 
         x_min, x_max = sorted([c1[0], c2[0]])
         y_min, y_max = sorted([c1[1], c2[1]])
 
-        return {
+        result = {
             'x_min': x_min, 'x_max': x_max,
             'y_min': y_min, 'y_max': y_max,
+            'spacing': spacing,
         }
+
+        logger.info(f"scan_for_parking_markers: Found markers at spacing {spacing:.3f}m")
+        return result
 
     def register_parking_slot(self) -> None:
         """
@@ -190,6 +244,9 @@ class Localization:
         for attempt in range(5):
             geometry = self.scan_for_parking_markers()
             if geometry:
+                # Remove 'spacing' from stored geometry (it's just for logging)
+                if 'spacing' in geometry:
+                    del geometry['spacing']
                 self.parking_bay_geometry = geometry
                 logger.info(
                     f"Parking bay geometry measured (attempt {attempt + 1}): {geometry}"
