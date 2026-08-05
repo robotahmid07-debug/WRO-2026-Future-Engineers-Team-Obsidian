@@ -1,8 +1,13 @@
 """
-Reads RPLIDAR C1 data via USB and provides range at a given angle.
+Reads RPLIDAR A1 data via USB and provides range at a given angle.
 Implements sector matching. Thread‑safe scan data access.
 Adds 3‑sample median filtering to eliminate laser dropouts.
 Provides front distance extraction for curvature estimation.
+
+Globally masks out points from car's own structural pillars:
+  - Angles: 45°, 135°, 225°, 315°
+  - Distance threshold: 8 cm
+  - Tolerance: ±2°
 """
 
 import threading
@@ -23,7 +28,7 @@ class LidarFusion:
 
         Args:
             port: Serial port of the RPLIDAR (e.g., '/dev/ttyUSB1').
-            baudrate: Communication speed. RPLIDAR C1 uses 460800.
+            baudrate: Communication speed. RPLIDAR A1 uses 460800.
             median_filter_size: Size of median filter for each sector (default 3).
         """
         self.port = port
@@ -37,6 +42,11 @@ class LidarFusion:
         self.scan_history: Dict[float, deque] = {}
         self.lock = threading.Lock()
         self.read_thread = None
+
+        # ---- Pillar mask configuration ----
+        self.pillar_angles = [45.0, 135.0, 225.0, 315.0]   # degrees
+        self.pillar_tolerance_deg = 2.0                     # ±2°
+        self.pillar_distance_threshold_m = 0.08             # 8 cm
 
     def open(self):
         """Open the LIDAR connection and start the background scanning thread."""
@@ -77,35 +87,52 @@ class LidarFusion:
     def _apply_median_filter(self, angle: float, raw_dist: float) -> float:
         """
         Apply 3‑sample median filter to smooth raw LIDAR distances.
-        Eliminates individual laser dropouts.
         Uses rounded angle as key to accumulate samples.
         """
-        # Use rounded angle to group nearby angles (bins of 1 degree)
         key = round(angle)
-
-        # Store raw distance in history buffer
         if key not in self.scan_history:
             self.scan_history[key] = deque(maxlen=self.median_filter_size)
         self.scan_history[key].append(raw_dist)
 
-        # If we have enough samples, compute median
         if len(self.scan_history[key]) >= self.median_filter_size:
             sorted_vals = sorted(self.scan_history[key])
             return sorted_vals[len(sorted_vals) // 2]
         else:
-            # Not enough samples yet – return raw value
             return raw_dist
+
+    def _is_pillar_point(self, angle: float, distance: float) -> bool:
+        """
+        Check if a point is from the car's own structural pillars.
+        Returns True if it should be masked out.
+        """
+        if distance >= self.pillar_distance_threshold_m:
+            return False
+
+        # Check if angle falls within tolerance of any pillar angle
+        for pa in self.pillar_angles:
+            diff = abs(angle - pa)
+            if diff > 180.0:
+                diff = 360.0 - diff
+            if diff <= self.pillar_tolerance_deg:
+                return True
+        return False
 
     def get_scan_snapshot(self) -> Dict[float, float]:
         """
         Return a thread‑safe copy of the latest LIDAR scan data,
-        with median filtering applied to each angle.
+        with median filtering applied and car‑structure pillar mask applied.
         """
         with self.lock:
-            # Create filtered copy
             filtered = {}
             for angle, dist in self.scan_data.items():
+                # ---- Pillar mask ----
+                if self._is_pillar_point(angle, dist):
+                    # Skip this point entirely – it's from the car itself
+                    continue
+
+                # Apply median filter to the remaining points
                 filtered[angle] = self._apply_median_filter(angle, dist)
+
             return filtered
 
     def get_front_distances(self, half_width_deg: float = 30.0) -> List[float]:
