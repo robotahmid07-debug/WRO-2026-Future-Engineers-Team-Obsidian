@@ -1,0 +1,197 @@
+1. New LIDAR pillar filter — verdict
+What you implemented
+textAngles:     45°, 135°, 225°, 315°
+Tolerance:  ±2°
+Distance:   < 0.08 m (8 cm) → drop point
+Applied in: get_scan_snapshot() → all consumers get a clean scan
+That’s the right place (global mask once, not in every module). Good design.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+AspectScoreCommentArchitectureGoodOne mask in get_scan_snapshot()Angle choiceGoodDiagonals match unused sectors±2° toleranceTightClose post often spans 5–15°; may still leak hits8 cm thresholdTightFine for a thin mast at the LIDAR; short if camera body is 10–15 cm awayOnly 4 rays, no global body min-rangeGapChassis / cables at 0°/90° still only filtered by old dist < 0.05 elsewhere
+Suggested tune (after one real scan log):
+Pythonself.pillar_tolerance_deg = 8.0          # was 2.0
+self.pillar_distance_threshold_m = 0.15  # was 0.08
+# optional extra:
+self.body_min_range_m = 0.12            # drop ANY point closer than 12 cm
+Logic:
+Pythonif distance < self.body_min_range_m:
+    return True  # always self-hit
+# then existing 4-pillar angle check
+
+2. Internal logic health (whole stack)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ModuleStatusNotesLIDAR fusion✅ ImprovedMedian + pillar mask; still no general body radiusState machine✅ SolidA–D logics, emergency → parking, lap geometry refreshParking controller✅ SolidD/E/F/G, stable frames, counter-direction escapeLocalization + wall map✅ OKIMU blend + map α correctionEmergency shield✅ OKUS + LIDAR rear/sidesVision → pillar✅ OKCamera ±30° → LIDAR sector ±10°
+Prior must-fixes still present:
+
+STABLE_FRAMES_REQUIRED = 8
+set_emergency_shield at init
+parking.start() only in TERMINATION on lap refresh
+
+
+3. Code quality (honest)
+Strengths
+
+Clear modules, YAML-driven behavior
+Global LIDAR mask is the correct pattern
+Parking and surprise logic are competition-oriented
+Logging is usable for debug
+
+Weak spots
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+IssueSeverityFixPillar mask ±2° / 8 cm may be too narrowMediumWiden after measuring real post spikeNo global body_min_rangeMediumAdd ~12–15 cm for all anglestime.sleep in _fine_tune_parkingLowNon-blocking timerINIT still calls parking.start()LowStore geometry only; start() when parking for realDoc mix A1 vs C1 / baudLowMatch real hardware in comments + baudstate_machine.py ~930 linesLowFine for WRO; optional later split
+Overall quality for a WRO team repo: strong intermediate / competition-ready, not fragile hobby code. Not “production perfect,” but coherent and rule-aligned.
+
+4. Does the pillar filter “work”?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ScenarioResultThin posts exactly on 45/135/225/315, < 8 cmYes — maskedWider camera housing or post slightly off angleMaybe — widen toleranceSelf-hit at 0° / 90° (if something sticks out)No — not covered; need body min-rangeReal wall at 45° and > 15 cmSafe — not masked
+
+5. Bottom line
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+QuestionAnswerIs the new filter in the right place?YesAre the 4 angles correct?YesIs implementation enough alone?Almost — tighten by widening ±2°/8 cm and adding a global close-range body maskCar logic quality overallGood — parking + navigation + surprise stack is consistent
+Recommended next edit (small): in _is_pillar_point (or at start of snapshot filter):
+
+Drop all points with dist < 0.12 (body).
+Keep diagonal mask with ±6–10° and ~0.15 m.
+
+Then log one stationary scan and confirm the post spikes are gone while walls at >20 cm remain. That makes the filter reliable on the real car, not only on paper.
