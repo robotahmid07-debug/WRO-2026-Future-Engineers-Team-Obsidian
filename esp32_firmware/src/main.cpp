@@ -171,12 +171,29 @@ void setup() {
     steeringServo.attach(SERVO_PIN);
     steeringServo.write(90);
 
-    // IMU (BNO086)
+    // ---- IMU (BNO086) with I2C address fallback ----
     Wire.begin(I2C_SDA, I2C_SCL);
-    if (!bno08x.begin_I2C()) {
-        Serial.println("BNO08x I2C init failed");
+
+    bool imu_found = false;
+
+    // Try default address 0x4A
+    if (bno08x.begin_I2C()) {
+        imu_found = true;
+        Serial.println("BNO08x found at 0x4A");
     } else {
+        // Try alternative address 0x4B (if ADR pin is pulled high)
+        Serial.println("BNO08x not at 0x4A, trying 0x4B...");
+        if (bno08x.begin_I2C(0x4B)) {
+            imu_found = true;
+            Serial.println("BNO08x found at 0x4B");
+        }
+    }
+
+    if (imu_found) {
         bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, 50);
+    } else {
+        Serial.println("BNO08x not found on I2C bus!");
+        // Continue without IMU – the car will fallback to kinematic odometry
     }
 
     Serial.println("ESP32-S3 ready");
