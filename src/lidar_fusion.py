@@ -5,9 +5,14 @@ Adds 3‑sample median filtering to eliminate laser dropouts.
 Provides front distance extraction for curvature estimation.
 
 Globally masks out points from car's own structural pillars:
-  - Angles: 45°, 135°, 225°, 315°
-  - Distance threshold: 8 cm
-  - Tolerance: ±2°
+  - Angles: 45°, 135°, 225°, 315° (diagonals only)
+  - Tolerance: ±6° (tuneable)
+  - Distance threshold: 12 cm (tuneable)
+  - Global minimum range: 8 cm (ignores any point closer than this)
+
+The mask does NOT affect angles used for wall‑following (0°, ±90°),
+front braking (0°), or parking (180°). It only removes points near
+the four diagonal directions that are within 12 cm of the LIDAR.
 """
 
 import threading
@@ -21,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 class LidarFusion:
+    # ---- Structural mask configuration (tune these at the top) ----
+    PILLAR_ANGLES = [45.0, 135.0, 225.0, 315.0]   # degrees (diagonals)
+    PILLAR_TOLERANCE_DEG = 6.0                     # ±6° tolerance
+    PILLAR_DISTANCE_THRESHOLD_M = 0.12             # 12 cm
+    GLOBAL_MIN_RANGE_M = 0.08                      # 8 cm – ignore anything closer
+
     def __init__(self, port: str = '/dev/ttyUSB1', baudrate: int = 460800,
                  median_filter_size: int = 3):
         """
@@ -42,11 +53,6 @@ class LidarFusion:
         self.scan_history: Dict[float, deque] = {}
         self.lock = threading.Lock()
         self.read_thread = None
-
-        # ---- Pillar mask configuration ----
-        self.pillar_angles = [45.0, 135.0, 225.0, 315.0]   # degrees
-        self.pillar_tolerance_deg = 2.0                     # ±2°
-        self.pillar_distance_threshold_m = 0.08             # 8 cm
 
     def open(self):
         """Open the LIDAR connection and start the background scanning thread."""
@@ -100,39 +106,43 @@ class LidarFusion:
         else:
             return raw_dist
 
-    def _is_pillar_point(self, angle: float, distance: float) -> bool:
+    def _is_masked_point(self, angle: float, distance: float) -> bool:
         """
-        Check if a point is from the car's own structural pillars.
-        Returns True if it should be masked out.
-        """
-        if distance >= self.pillar_distance_threshold_m:
-            return False
+        Check if a point should be masked (car's own structure).
+        Returns True if it should be removed from the scan.
 
-        # Check if angle falls within tolerance of any pillar angle
-        for pa in self.pillar_angles:
+        First applies a global minimum range filter (distance < GLOBAL_MIN_RANGE_M).
+        Then checks if the point is at a diagonal angle within the tolerance
+        and within the pillar distance threshold.
+        """
+        # ---- 1. Global minimum range (ignore anything too close) ----
+        if distance < self.GLOBAL_MIN_RANGE_M:
+            return True
+
+        # ---- 2. Diagonal pillar mask ----
+        if distance >= self.PILLAR_DISTANCE_THRESHOLD_M:
+            return False  # Too far to be a pillar
+
+        for pa in self.PILLAR_ANGLES:
             diff = abs(angle - pa)
             if diff > 180.0:
                 diff = 360.0 - diff
-            if diff <= self.pillar_tolerance_deg:
+            if diff <= self.PILLAR_TOLERANCE_DEG:
                 return True
+
         return False
 
     def get_scan_snapshot(self) -> Dict[float, float]:
         """
         Return a thread‑safe copy of the latest LIDAR scan data,
-        with median filtering applied and car‑structure pillar mask applied.
+        with median filtering applied and structural mask applied.
         """
         with self.lock:
             filtered = {}
             for angle, dist in self.scan_data.items():
-                # ---- Pillar mask ----
-                if self._is_pillar_point(angle, dist):
-                    # Skip this point entirely – it's from the car itself
+                if self._is_masked_point(angle, dist):
                     continue
-
-                # Apply median filter to the remaining points
                 filtered[angle] = self._apply_median_filter(angle, dist)
-
             return filtered
 
     def get_front_distances(self, half_width_deg: float = 30.0) -> List[float]:
