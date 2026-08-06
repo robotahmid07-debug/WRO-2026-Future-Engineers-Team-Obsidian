@@ -8,7 +8,6 @@ Globally masks out points from car's own structural pillars:
   - Angles: 45°, 135°, 225°, 315° (diagonals only)
   - Tolerance: ±6° (tuneable)
   - Distance threshold: 12 cm (tuneable)
-  - Global minimum range: 8 cm (ignores any point closer than this)
 
 The mask does NOT affect angles used for wall‑following (0°, ±90°),
 front braking (0°), or parking (180°). It only removes points near
@@ -30,7 +29,6 @@ class LidarFusion:
     PILLAR_ANGLES = [45.0, 135.0, 225.0, 315.0]   # degrees (diagonals)
     PILLAR_TOLERANCE_DEG = 6.0                     # ±6° tolerance
     PILLAR_DISTANCE_THRESHOLD_M = 0.12             # 12 cm
-    GLOBAL_MIN_RANGE_M = 0.08                      # 8 cm – ignore anything closer
 
     def __init__(self, port: str = '/dev/ttyUSB1', baudrate: int = 460800,
                  median_filter_size: int = 3):
@@ -108,18 +106,17 @@ class LidarFusion:
 
     def _is_masked_point(self, angle: float, distance: float) -> bool:
         """
-        Check if a point should be masked (car's own structure).
+        Check if a point should be masked (car's own structural pillars).
         Returns True if it should be removed from the scan.
 
-        First applies a global minimum range filter (distance < GLOBAL_MIN_RANGE_M).
-        Then checks if the point is at a diagonal angle within the tolerance
-        and within the pillar distance threshold.
-        """
-        # ---- 1. Global minimum range (ignore anything too close) ----
-        if distance < self.GLOBAL_MIN_RANGE_M:
-            return True
+        Only masks points that are:
+          - At one of the four diagonal angles: 45°, 135°, 225°, 315°
+          - Within the tolerance (±6°)
+          - Closer than the distance threshold (12 cm)
 
-        # ---- 2. Diagonal pillar mask ----
+        Does NOT mask rear (180°), sides (±90°), or front (0°).
+        """
+        # ---- Diagonal pillar mask ----
         if distance >= self.PILLAR_DISTANCE_THRESHOLD_M:
             return False  # Too far to be a pillar
 
