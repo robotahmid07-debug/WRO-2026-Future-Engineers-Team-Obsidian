@@ -4,14 +4,17 @@ Implements sector matching. Thread‑safe scan data access.
 Adds 3‑sample median filtering to eliminate laser dropouts.
 Provides front distance extraction for curvature estimation.
 
-Globally masks out points from car's own structural pillars:
-  - Angles: 45°, 135°, 225°, 315° (diagonals only)
-  - Tolerance: ±6° (tuneable)
-  - Distance threshold: 12 cm (tuneable)
+Filters:
+  1. Diagonal pillar mask (ALWAYS ACTIVE):
+     - Angles: 45°, 135°, 225°, 315° (diagonals only)
+     - Tolerance: ±6°
+     - Distance: < 12 cm
+     - Does NOT affect 0°, ±90°, or 180° (wall-following, braking, parking)
 
-The mask does NOT affect angles used for wall‑following (0°, ±90°),
-front braking (0°), or parking (180°). It only removes points near
-the four diagonal directions that are within 12 cm of the LIDAR.
+  2. Global minimum range filter (TOGGLEABLE):
+     - Default: OFF
+     - When ON: ignores ALL points < 8 cm (ANY angle)
+     - Use set_global_min_range(True/False) to control
 """
 
 import threading
@@ -25,10 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 class LidarFusion:
-    # ---- Structural mask configuration (tune these at the top) ----
-    PILLAR_ANGLES = [45.0, 135.0, 225.0, 315.0]   # degrees (diagonals)
-    PILLAR_TOLERANCE_DEG = 6.0                     # ±6° tolerance
+    # ---- Diagonal pillar mask (always active) ----
+    PILLAR_ANGLES = [45.0, 135.0, 225.0, 315.0]   # degrees
+    PILLAR_TOLERANCE_DEG = 6.0                     # ±6°
     PILLAR_DISTANCE_THRESHOLD_M = 0.12             # 12 cm
+
+    # ---- Global minimum range (toggleable) ----
+    GLOBAL_MIN_RANGE_M = 0.08                      # 8 cm
 
     def __init__(self, port: str = '/dev/ttyUSB1', baudrate: int = 460800,
                  median_filter_size: int = 3):
@@ -51,6 +57,22 @@ class LidarFusion:
         self.scan_history: Dict[float, deque] = {}
         self.lock = threading.Lock()
         self.read_thread = None
+
+        # ---- Global minimum range toggle state ----
+        self.global_min_range_enabled = False   # OFF by default
+
+    def set_global_min_range(self, enabled: bool):
+        """
+        Enable or disable the global minimum range filter.
+
+        When enabled, ALL LIDAR points closer than 8 cm are ignored
+        (regardless of angle). This is useful for debugging or if you
+        want to ignore noise from the car's body.
+
+        Default: OFF (so rear wall at 5 cm is visible for parking).
+        """
+        self.global_min_range_enabled = enabled
+        logger.info(f"Global minimum range filter {'enabled' if enabled else 'disabled'}")
 
     def open(self):
         """Open the LIDAR connection and start the background scanning thread."""
@@ -106,17 +128,20 @@ class LidarFusion:
 
     def _is_masked_point(self, angle: float, distance: float) -> bool:
         """
-        Check if a point should be masked (car's own structural pillars).
+        Check if a point should be masked.
+
         Returns True if it should be removed from the scan.
 
-        Only masks points that are:
-          - At one of the four diagonal angles: 45°, 135°, 225°, 315°
-          - Within the tolerance (±6°)
-          - Closer than the distance threshold (12 cm)
-
-        Does NOT mask rear (180°), sides (±90°), or front (0°).
+        Two filters are applied:
+          1. Global minimum range (toggleable) – ignores ALL points < 8 cm.
+          2. Diagonal pillar mask (always active) – ignores points at 45°,
+             135°, 225°, 315° within 12 cm.
         """
-        # ---- Diagonal pillar mask ----
+        # ---- 1. Global minimum range (toggleable) ----
+        if self.global_min_range_enabled and distance < self.GLOBAL_MIN_RANGE_M:
+            return True
+
+        # ---- 2. Diagonal pillar mask (always active) ----
         if distance >= self.PILLAR_DISTANCE_THRESHOLD_M:
             return False  # Too far to be a pillar
 
@@ -132,7 +157,7 @@ class LidarFusion:
     def get_scan_snapshot(self) -> Dict[float, float]:
         """
         Return a thread‑safe copy of the latest LIDAR scan data,
-        with median filtering applied and structural mask applied.
+        with median filtering applied and both filters applied.
         """
         with self.lock:
             filtered = {}
