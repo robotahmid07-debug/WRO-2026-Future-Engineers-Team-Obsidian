@@ -11,6 +11,7 @@ Integrates all Phase 1 + Phase 2 features plus:
   - True parallel + inside check (LOGIC F via parking controller)
   - Enhanced touch avoidance (LOGIC G via parking controller)
   - Camera FOV corrected (116° lens) using vision.pixel_to_angle()
+  - Optional camera‑LIDAR offset correction (toggleable)
 """
 
 import time
@@ -543,8 +544,25 @@ class StateMachine:
                     angle_rad = math.radians(angle_deg)
                     x_local = range_m * math.cos(angle_rad)
                     y_local = range_m * math.sin(angle_rad)
-                    if x_local > 0:
-                        detections.append((cb.color_id, x_local, y_local))
+
+                    # ---- Optional camera-LIDAR offset correction ----
+                    # Enable this if you want to compensate for the physical offset
+                    # between the camera and LIDAR on your car.
+                    ENABLE_OFFSET_CORRECTION = True   # Set to False to disable
+
+                    # Camera is 0.10972 m AHEAD of LIDAR (forward offset)
+                    CAMERA_OFFSET_X = 0.10972   # meters
+                    CAMERA_OFFSET_Z = 0.0       # lateral offset is zero
+
+                    if ENABLE_OFFSET_CORRECTION:
+                        x_local_corrected = x_local - CAMERA_OFFSET_X
+                        y_local_corrected = y_local   # no lateral correction
+                    else:
+                        x_local_corrected = x_local
+                        y_local_corrected = y_local
+
+                    if x_local_corrected > 0:
+                        detections.append((cb.color_id, x_local_corrected, y_local_corrected))
 
             confirmed = self.spatial_map.get_confirmed_objects()
             traffic_angular = 0.0
