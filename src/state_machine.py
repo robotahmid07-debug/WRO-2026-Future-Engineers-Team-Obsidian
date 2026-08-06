@@ -10,6 +10,7 @@ Integrates all Phase 1 + Phase 2 features plus:
   - Ultrasonic + LIDAR fusion (LOGIC E via parking controller)
   - True parallel + inside check (LOGIC F via parking controller)
   - Enhanced touch avoidance (LOGIC G via parking controller)
+  - Camera FOV corrected (116° lens) using vision.pixel_to_angle()
 """
 
 import time
@@ -525,7 +526,10 @@ class StateMachine:
                 aspect = cb.height / cb.width
                 if cb.y < self.ROI_Y_MIN or cb.y > self.ROI_Y_MAX:
                     continue
-                angle_deg = ((cb.x - 160) / 160.0) * 30.0
+
+                # ---- FOV FIX: use camera's actual 116° FOV ----
+                angle_deg = self.vision.pixel_to_angle(cb.x)
+
                 range_m = self.lidar.get_range_in_sector(angle_deg, self.LIDAR_SECTOR_TOLERANCE)
                 if range_m is not None and range_m > 0.1:
                     if range_m > 0.8:
