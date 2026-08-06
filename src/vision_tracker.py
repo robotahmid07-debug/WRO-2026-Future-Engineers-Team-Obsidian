@@ -35,16 +35,22 @@ class HuskyLensReader:
     Supports I2C communication on Raspberry Pi.
     """
 
-    def __init__(self, i2c_bus: int = 1, poll_interval: float = 0.05):
+    def __init__(self, i2c_bus: int = 1, poll_interval: float = 0.05,
+                 fov_deg: float = 116.0):
         """
         Initialise HuskyLens V2 reader.
 
         Args:
             i2c_bus: I2C bus number (1 on Raspberry Pi).
             poll_interval: Polling interval in seconds.
+            fov_deg: Horizontal Field of View of the lens in degrees.
+                     Default 116.0° for the wide-angle lens.
         """
         self.i2c_bus = i2c_bus
         self.poll_interval = poll_interval
+        self.fov_deg = fov_deg
+        self.half_fov = fov_deg / 2.0          # Half FOV for angle mapping
+        self.image_width = 320                 # HuskyLens V2 image width in pixels
         self.hl: Optional[HuskyLens] = None
         self.running = False
         self.read_thread = None
@@ -53,6 +59,23 @@ class HuskyLensReader:
         # Colour name mapping (learned colours)
         self.color_names: dict[int, str] = {}
         self._color_name_lock = threading.Lock()
+
+    def pixel_to_angle(self, x_px: int) -> float:
+        """
+        Convert a pixel x-coordinate (0-319) to an angle in degrees
+        relative to the camera's forward axis (0° = centre).
+
+        Positive angles are to the right, negative to the left.
+        Assumes the lens distortion is negligible.
+
+        Args:
+            x_px: Pixel x-coordinate from HuskyLens (0-319).
+
+        Returns:
+            Angle in degrees (float), range approximately [-half_fov, +half_fov].
+        """
+        center = self.image_width / 2.0
+        return ((x_px - center) / center) * self.half_fov
 
     def open(self) -> bool:
         """
