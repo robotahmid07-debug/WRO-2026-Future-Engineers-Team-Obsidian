@@ -13,7 +13,7 @@ Integrates all Phase 1 + Phase 2 features plus:
   - Camera FOV corrected (116° lens) using vision.pixel_to_angle()
   - Optional camera‑LIDAR offset correction (toggleable)
 """
-# Hi
+
 import time
 import math
 import logging
@@ -552,11 +552,11 @@ class StateMachine:
 
                     # Camera is 0.10972 m AHEAD of LIDAR (forward offset)
                     CAMERA_OFFSET_X = 0.10972   # meters
-                    CAMERA_OFFSET_Z = 0.0       # lateral offset is zero
+                    # Lateral offset is zero, so we don't need a variable for it
 
                     if ENABLE_OFFSET_CORRECTION:
                         x_local_corrected = x_local - CAMERA_OFFSET_X
-                        y_local_corrected = y_local   # no lateral correction
+                        y_local_corrected = y_local
                     else:
                         x_local_corrected = x_local
                         y_local_corrected = y_local
