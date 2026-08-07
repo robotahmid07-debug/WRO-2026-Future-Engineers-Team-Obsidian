@@ -11,7 +11,7 @@ from typing import Optional, List
 
 # Official pyhuskylens library for HuskyLens V2
 from pyhuskylens import HuskyLens, ALGORITHM_COLOR_RECOGNITION
-
+# Hi
 logger = logging.getLogger(__name__)
 
 
