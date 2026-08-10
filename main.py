@@ -10,7 +10,7 @@ Reads hardware switches to select:
 All calibratable parameters are read from config.
 
 Hardware interfaces:
-  - LIDAR: RPLIDAR A1 on /dev/ttyUSB1
+  - LIDAR: RPLIDAR A1 on /dev/rplidar (if udev rule exists) or /dev/ttyUSB1
   - HuskyLens V2 on I2C bus 1
   - ESP32-S3 on /dev/ttyAMA0 (UART)
   - GPIO switches for mode, direction, start
@@ -81,9 +81,17 @@ def main():
         logger.info("Hardware switch: OPEN challenge (stop at start)")
 
     # ---- 2b. LIDAR initialization (moved earlier for auto‑direction) ----
-    lidar = LidarFusion(port='/dev/ttyUSB1')
+    # Detect LIDAR port: prefer udev symlink /dev/rplidar, fallback to /dev/ttyUSB1
+    lidar_port = '/dev/rplidar'
+    if not Path(lidar_port).exists():
+        lidar_port = '/dev/ttyUSB1'
+        logger.info(f"Using LIDAR port: {lidar_port}")
+    else:
+        logger.info(f"Using LIDAR port: {lidar_port} (symlink)")
+
+    lidar = LidarFusion(port=lidar_port)
     lidar.open()
-    logger.info("LIDAR initialized on /dev/ttyUSB1")
+    logger.info("LIDAR initialized")
 
     # ---- 2c. Direction: switch (manual) or auto (LIDAR‑based) ----
     direction_mode = config.navigation.direction_mode
