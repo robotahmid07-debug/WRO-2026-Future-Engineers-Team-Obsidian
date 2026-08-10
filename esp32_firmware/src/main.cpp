@@ -125,15 +125,16 @@ void handleCommand(const String &cmd) {
         String val = cmd.substring(colon + 1, comma);
         motorSpeed = val.toInt();
         motorSpeed = constrain(motorSpeed, -255, 255);
-        // Update motor PWM
+
+        // ---- BTS7960 control with enables tied to 5V ----
         if (motorSpeed >= 0) {
-            digitalWrite(MOTOR_DIR1, LOW);
-            digitalWrite(MOTOR_DIR2, HIGH);
+            // Forward: RPWM = speed, LPWM = 0
             analogWrite(MOTOR_PWM1, motorSpeed);
+            analogWrite(MOTOR_PWM2, 0);
         } else {
-            digitalWrite(MOTOR_DIR1, HIGH);
-            digitalWrite(MOTOR_DIR2, LOW);
-            analogWrite(MOTOR_PWM1, -motorSpeed);
+            // Reverse: RPWM = 0, LPWM = -speed (positive value)
+            analogWrite(MOTOR_PWM1, 0);
+            analogWrite(MOTOR_PWM2, -motorSpeed);
         }
     }
     if (steerIdx != -1) {
@@ -160,12 +161,11 @@ void setup() {
         pinMode(echoPins[i], INPUT);
     }
 
-    // Motor pins
+    // Motor pins – only PWM pins needed (enables tied to 5V)
     pinMode(MOTOR_PWM1, OUTPUT);
-    pinMode(MOTOR_PWM2, OUTPUT);  // not used, but set
-    pinMode(MOTOR_DIR1, OUTPUT);
-    pinMode(MOTOR_DIR2, OUTPUT);
+    pinMode(MOTOR_PWM2, OUTPUT);
     analogWriteFrequency(MOTOR_PWM1, 20000); // 20kHz PWM
+    analogWriteFrequency(MOTOR_PWM2, 20000); // 20kHz PWM
 
     // Servo
     steeringServo.attach(SERVO_PIN);
