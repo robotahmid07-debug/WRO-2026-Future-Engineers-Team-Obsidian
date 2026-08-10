@@ -1,0 +1,13 @@
+🔧 How to Use
+Burn Raspberry Pi OS to your SD card.
+
+Clone your repository to /home/pi/wro_future_engineers_2026:
+
+bash
+git clone https://github.com/robotahmid07-debug/WRO-2026-Future-Engineers-Team-Obsidian.git /home/pi/wro_future_engineers_2026
+Run the installer:
+
+bash
+cd /home/pi/wro_future_engineers_2026
+chmod +x scripts/install_dependencies.sh
+./scripts/install_dependencies.sh
