@@ -6,40 +6,36 @@
 // ============================================================
 // GPIO 17 (TX) → Pi GPIO 15 (RX)
 // GPIO 18 (RX) ← Pi GPIO 14 (TX)
-#define UART_TX 17
-#define UART_RX 18
+#define SERIAL_TX_PIN 17
+#define SERIAL_RX_PIN 18
 
 // ============================================================
 // Ultrasonic Sensors (HC-SR04)
 // ============================================================
-#define FRONT_TRIG       4
-#define FRONT_ECHO       5
-
-#define FRONT_LEFT_TRIG  6
-#define FRONT_LEFT_ECHO  7
-
-#define FRONT_RIGHT_TRIG 15
-#define FRONT_RIGHT_ECHO 16
+#define TRIG1  4   // Front centre
+#define ECHO1  5
+#define TRIG2  6   // Front left
+#define ECHO2  7
+#define TRIG3  15  // Front right
+#define ECHO3  16
 
 // ============================================================
-// Motor Driver (BTS 7960) – Two PWM pins (forward & reverse)
+// Motor Driver (BTS 7960) – Enables tied to 5V
 // ============================================================
-// Single drive motor – forward PWM and reverse PWM
-#define MOTOR_FWD_PWM    1   // RPWM
-#define MOTOR_REV_PWM    2   // LPWM
-
-// Enable pins (R_EN and L_EN) – we'll pull them HIGH in setup
-#define MOTOR_EN         3   // optional, can be tied to 3.3V directly
+// Single drive motor – forward PWM (RPWM) and reverse PWM (LPWM)
+// R_EN and L_EN are tied directly to 5V – no GPIO control needed.
+#define MOTOR_PWM1  1   // RPWM – forward PWM
+#define MOTOR_PWM2  2   // LPWM – reverse PWM
 
 // ============================================================
 // Steering Servo (Ackermann steering)
 // ============================================================
-#define SERVO_PWM        41
+#define SERVO_PIN  41   // PWM output
 
 // ============================================================
 // BNO086 IMU – I2C Bus
 // ============================================================
-#define IMU_SDA          8
-#define IMU_SCL          9
+#define I2C_SDA  8
+#define I2C_SCL  9
 
 #endif
