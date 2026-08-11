@@ -1,4 +1,12 @@
 # ONE Thing I Must Calibrate on Race Day
+
+
+
+
+
+
+
+change baud rate 
 ProblemWhat to tuneMisses real pillarsLower area min, more FOV, confirmation frames 2 not 3False pillarsHigher confirmation frames, stricter aspect, stronger LIDAR range checkCamera mast seen as color pillarUnlikely (mast isn’t red/green ID) — fix in LIDAR mask, not vision
 The code is logically complete, but these physical constants need tuning for your specific robot:
 # shafi and Tahmid cheack those codes and constrains
