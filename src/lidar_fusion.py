@@ -15,6 +15,9 @@ Filters:
      - Default: OFF
      - When ON: ignores ALL points < 8 cm (ANY angle)
      - Use set_global_min_range(True/False) to control
+
+Baud rate: 115200 (more reliable for RPLIDAR A1 on Raspberry Pi)
+Port: /dev/rplidar (udev symlink) – falls back to /dev/ttyUSB1 if not found.
 """
 
 import threading
@@ -36,14 +39,14 @@ class LidarFusion:
     # ---- Global minimum range (toggleable) ----
     GLOBAL_MIN_RANGE_M = 0.08                      # 8 cm
 
-    def __init__(self, port: str = '/dev/ttyUSB1', baudrate: int = 460800,
+    def __init__(self, port: str = '/dev/rplidar', baudrate: int = 115200,
                  median_filter_size: int = 3):
         """
         Initialize LIDAR fusion.
 
         Args:
-            port: Serial port of the RPLIDAR (e.g., '/dev/ttyUSB1').
-            baudrate: Communication speed. RPLIDAR A1 uses 460800.
+            port: Serial port of the RPLIDAR (default: '/dev/rplidar' – udev symlink).
+            baudrate: Communication speed. RPLIDAR A1 reliably works at 115200.
             median_filter_size: Size of median filter for each sector (default 3).
         """
         self.port = port
