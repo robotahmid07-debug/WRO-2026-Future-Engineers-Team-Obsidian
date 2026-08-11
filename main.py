@@ -82,7 +82,7 @@ def main():
 
     # ---- 2b. LIDAR initialization (moved earlier for auto‑direction) ----
     # Detect LIDAR port: prefer udev symlink /dev/rplidar, fallback to /dev/ttyUSB1
-    lidar_port = '/dev/rplidar'
+    lidar_port = '/dev/ttyUSB0'
     if not Path(lidar_port).exists():
         lidar_port = '/dev/ttyUSB1'
         logger.info(f"Using LIDAR port: {lidar_port}")
