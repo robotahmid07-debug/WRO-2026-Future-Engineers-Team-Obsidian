@@ -10,7 +10,7 @@ Reads hardware switches to select:
 All calibratable parameters are read from config.
 
 Hardware interfaces:
-  - LIDAR: RPLIDAR A1 on /dev/rplidar (if udev rule exists) or /dev/ttyUSB1
+  - LIDAR: RPLIDAR A1 on /dev/rplidar (preferred) or /dev/ttyUSB0/1
   - HuskyLens V2 on I2C bus 1
   - ESP32-S3 on /dev/ttyAMA0 (UART)
   - GPIO switches for mode, direction, start
@@ -81,14 +81,22 @@ def main():
         logger.info("Hardware switch: OPEN challenge (stop at start)")
 
     # ---- 2b. LIDAR initialization (moved earlier for auto‑direction) ----
-    # Detect LIDAR port: prefer udev symlink /dev/rplidar, fallback to /dev/ttyUSB1
-    lidar_port = '/dev/ttyUSB0'
-    if not Path(lidar_port).exists():
+    # Detect LIDAR port: prefer udev symlink /dev/rplidar, fallback to /dev/ttyUSB0 or /dev/ttyUSB1
+    lidar_port = None
+    if Path('/dev/rplidar').exists():
+        lidar_port = '/dev/rplidar'
+        logger.info(f"Using LIDAR port: {lidar_port} (udev symlink)")
+    elif Path('/dev/ttyUSB0').exists():
+        lidar_port = '/dev/ttyUSB0'
+        logger.info(f"Using LIDAR port: {lidar_port}")
+    elif Path('/dev/ttyUSB1').exists():
         lidar_port = '/dev/ttyUSB1'
         logger.info(f"Using LIDAR port: {lidar_port}")
     else:
-        logger.info(f"Using LIDAR port: {lidar_port} (symlink)")
+        logger.error("No LIDAR port found! Please check USB connection.")
+        sys.exit(1)
 
+    # The LidarFusion class now defaults to 115200 baud (more reliable for RPLIDAR A1)
     lidar = LidarFusion(port=lidar_port)
     lidar.open()
     logger.info("LIDAR initialized")
