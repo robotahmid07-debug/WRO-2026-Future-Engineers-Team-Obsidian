@@ -15,3 +15,52 @@ Reboot when prompted.
 
 The robot will auto‑start on boot.
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+C:\Users\USER>ssh pi@192.168.1.8
+pi@192.168.1.8's password:
+Linux wro-robot 6.18.39+rpt-rpi-2712 #1 SMP PREEMPT Debian 1:6.18.39-1+rpt1 (2026-07-29) aarch64
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Tue Aug 11 15:30:40 2026 from 192.168.1.5
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $ ^C
+pi@wro-robot:~ $
