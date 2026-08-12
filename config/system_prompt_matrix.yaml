@@ -58,7 +58,7 @@ system_prompt_matrix:
 
     lidar_2d:
       port: "/dev/ttyUSB1"
-      baudrate: 460800
+      baudrate: 115200
       scan_arc_deg: 90.0
       update_rate_hz: 10
 
