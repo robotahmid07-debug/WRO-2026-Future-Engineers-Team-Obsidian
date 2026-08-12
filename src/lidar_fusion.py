@@ -17,13 +17,15 @@ Filters:
      - Use set_global_min_range(True/False) to control
 
 Baud rate: 115200 (more reliable for RPLIDAR A1 on Raspberry Pi)
-Port: /dev/rplidar (udev symlink) – falls back to /dev/ttyUSB1 if not found.
+Port: auto‑detects /dev/rplidar → /dev/ttyUSB0 → /dev/ttyUSB1
 """
 
 import threading
 import logging
+import time
 from typing import Dict, List, Optional
 from collections import deque
+from pathlib import Path
 
 from rplidar import RPLidar
 
@@ -77,8 +79,22 @@ class LidarFusion:
         self.global_min_range_enabled = enabled
         logger.info(f"Global minimum range filter {'enabled' if enabled else 'disabled'}")
 
+    def _find_port(self) -> str:
+        """Find the first available LIDAR port."""
+        candidates = ['/dev/rplidar', '/dev/ttyUSB0', '/dev/ttyUSB1']
+        for p in candidates:
+            if Path(p).exists():
+                return p
+        return self.port  # fallback to whatever was passed
+
     def open(self):
         """Open the LIDAR connection and start the background scanning thread."""
+        # Try to find the correct port
+        actual_port = self._find_port()
+        if actual_port != self.port:
+            logger.info(f"Using port: {actual_port} (was {self.port})")
+            self.port = actual_port
+
         try:
             self.lidar = RPLidar(self.port, baudrate=self.baudrate)
             self.running = True
@@ -93,23 +109,33 @@ class LidarFusion:
         """Stop the scanning thread and disconnect the LIDAR."""
         self.running = False
         if self.lidar:
-            self.lidar.stop()
-            self.lidar.disconnect()
+            try:
+                self.lidar.stop()
+                self.lidar.disconnect()
+            except Exception as e:
+                logger.debug(f"LIDAR disconnect error (ignored): {e}")
         if self.read_thread:
             self.read_thread.join(timeout=1.0)
         logger.info("LIDAR closed")
 
     def _scan_loop(self):
-        """Background thread: continuously fetch LIDAR scans and store the latest."""
+        """
+        Background thread: continuously fetch LIDAR measurements and store the latest.
+        Uses iter_measurments() instead of iter_scans() for reliability.
+        """
         try:
-            for scan in self.lidar.iter_scans():
+            # Stop any previous scan and wait for motor to stabilise
+            self.lidar.stop()
+            time.sleep(0.5)
+
+            for meas in self.lidar.iter_measurments():
                 if not self.running:
                     break
-                with self.lock:
-                    self.scan_data.clear()
-                    for _, angle, distance in scan:
-                        if distance > 0:  # ignore invalid readings
-                            self.scan_data[angle] = distance / 1000.0  # mm → m
+                # meas = (quality, angle, distance)
+                quality, angle, distance = meas
+                if distance > 0:  # ignore invalid readings
+                    with self.lock:
+                        self.scan_data[angle] = distance / 1000.0  # mm → m
         except Exception as e:
             logger.error(f"LIDAR scan error: {e}")
 
