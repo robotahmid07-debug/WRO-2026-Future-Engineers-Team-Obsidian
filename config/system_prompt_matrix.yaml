@@ -281,7 +281,7 @@ system_prompt_matrix:
   # VEHICLE PHYSICAL PARAMETERS
   # ==========================================
   vehicle:
-    wheelbase_m: 0.25
+    wheelbase_m: 0.20
     max_speed_mps: 1.5                  # Absolute hard limit (never exceed this)
     max_steer_rad: 0.524                # 30°
 
