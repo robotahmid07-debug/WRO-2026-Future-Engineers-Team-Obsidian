@@ -26,7 +26,6 @@ import time
 import serial
 from typing import Dict, Optional, List
 from collections import deque
-import math
 
 logger = logging.getLogger(__name__)
 
