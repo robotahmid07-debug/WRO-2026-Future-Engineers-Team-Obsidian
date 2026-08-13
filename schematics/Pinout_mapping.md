@@ -72,13 +72,20 @@
 #### Switch_1 
 | Switch Pin | Connection Point | Logic / State |
 | :--- | :--- | :--- |
-| **Pin A** | Raspberry Pi 5 Pin 15 (GPIO 22) | **CLOSED (GND)** = Obstacle Challenge |
-| **
+| **Pin A** | IRF4905 common gate | **CLOSED** = OFF |
+| **Pin B** | Commmon GND | **OPEN** = ON |
 
+#### Switch_2
 | Switch Pin | Connection Point | Logic / State |
 | :--- | :--- | :--- |
-| **Pin A** | Raspberry Pi 5 Pin 15 (GPIO 22) | **CLOSED (GND)** = Obstacle Challenge |
-| **Pin B** | Any Raspberry Pi GND Pin | **OPEN (High)** = Open Challenge |
+| **Pin A** | Raspberry Pin GPIO 22) | **CLOSED (GND)** = Obstacle Challenge |
+| **Pin B** | Commmon GND | **OPEN (High)** = Open Challenge |
+
+#### Switch_3
+| Switch Pin | Connection Point | Logic / State |
+| :--- | :--- | :--- |
+| **Pin A** | Raspberry Pin GPIO 23) | **CLOSED (GND)** = Clockwise  |
+| **Pin B** | Commmon GND | **OPEN (High)** = Anticlockwise  |
 
 ---
 ### Hardware Architecture Flowchart
