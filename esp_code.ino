@@ -4,7 +4,7 @@
 // ================================================================
 // - Non-blocking ultrasonic (timeout 10ms, 20Hz)
 // - Motor safety timeout (5 seconds)
-// - LEDC PWM for motors (20kHz)
+// - PWM using analogWrite (with analogWriteFrequency)
 // - Servo timer auto-allocated
 // - IMU with fallback
 // ================================================================
@@ -151,13 +151,13 @@ void handleCommand(const String &cmd) {
     String val = cmd.substring(colon + 1, comma);
     motorSpeed = constrain(val.toInt(), -255, 255);
 
-    // Apply motor PWM via LEDC (channels 0 and 1)
+    // Apply motor PWM using analogWrite (with frequency set in setup)
     if (motorSpeed >= 0) {
-      ledcWrite(0, motorSpeed);
-      ledcWrite(1, 0);
+      analogWrite(MOTOR_PWM1, motorSpeed);
+      analogWrite(MOTOR_PWM2, 0);
     } else {
-      ledcWrite(0, 0);
-      ledcWrite(1, -motorSpeed);
+      analogWrite(MOTOR_PWM1, 0);
+      analogWrite(MOTOR_PWM2, -motorSpeed);
     }
   }
 
@@ -184,13 +184,11 @@ void setup() {
     pinMode(echoPins[i], INPUT);
   }
 
-  // ---- Motor PWM using LEDC (20kHz, 8-bit resolution) ----
+  // ---- Motor PWM (using analogWrite with 20kHz frequency) ----
   pinMode(MOTOR_PWM1, OUTPUT);
   pinMode(MOTOR_PWM2, OUTPUT);
-  ledcSetup(0, 20000, 8);   // channel 0, 20kHz, 8-bit
-  ledcAttachPin(MOTOR_PWM1, 0);
-  ledcSetup(1, 20000, 8);   // channel 1, 20kHz, 8-bit
-  ledcAttachPin(MOTOR_PWM2, 1);
+  analogWriteFrequency(MOTOR_PWM1, 20000);
+  analogWriteFrequency(MOTOR_PWM2, 20000);
 
   // ---- Servo (timer auto-allocated) ----
   steeringServo.setPeriodHertz(50);
@@ -258,8 +256,8 @@ void loop() {
   if (now - lastCommandTime > 5000) {
     if (motorSpeed != 0) {
       motorSpeed = 0;
-      ledcWrite(0, 0);
-      ledcWrite(1, 0);
+      analogWrite(MOTOR_PWM1, 0);
+      analogWrite(MOTOR_PWM2, 0);
       Serial.println("Motor safety timeout: motors stopped");
     }
   }
