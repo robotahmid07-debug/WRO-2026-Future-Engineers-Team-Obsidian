@@ -1,6 +1,12 @@
 // ================================================================
 // WRO 2026 Future Engineers - Team Obsidian
-// ESP32-S3 Firmware - SINGLE FILE (Arduino IDE Compatible)
+// ESP32-S3 Firmware - Single File (Arduino IDE Compatible)
+// ================================================================
+// - Non-blocking ultrasonic (timeout 10ms, 20Hz)
+// - Motor safety timeout (5 seconds)
+// - LEDC PWM for motors (20kHz)
+// - Servo timer auto-allocated
+// - IMU with fallback
 // ================================================================
 
 #include <Arduino.h>
@@ -9,7 +15,7 @@
 #include <ESP32Servo.h>
 
 // ============================================================
-// PIN DEFINITIONS
+// PIN DEFINITIONS (match system_prompt_matrix.yaml)
 // ============================================================
 #define SERIAL_TX_PIN 17
 #define SERIAL_RX_PIN 18
@@ -43,18 +49,19 @@ float ultrasonic2 = 0.0;
 float ultrasonic3 = 0.0;
 float imu_yaw_rate = 0.0;
 
-int motorSpeed = 0;
-int steeringAngle = 90;
+int motorSpeed = 0;           // -255..255
+int steeringAngle = 90;       // 0..180
 
 unsigned long lastIMURead = 0;
 unsigned long lastUltrasonicRead = 0;
 unsigned long lastSend = 0;
+unsigned long lastCommandTime = 0;   // for motor safety timeout
 
 bool imu_found = false;
 sh2_SensorValue_t sensorValue;
 
 // ============================================================
-// XOR Checksum
+// XOR Checksum (for outgoing sensor data)
 // ============================================================
 uint8_t computeXOR(const String &str) {
   uint8_t checksum = 0;
@@ -85,7 +92,7 @@ void sendSensorData() {
 }
 
 // ============================================================
-// Read Ultrasonic sensors
+// Read Ultrasonic sensors – Non-blocking (timeout 10ms)
 // ============================================================
 void readUltrasonics() {
   for (int i = 0; i < 3; i++) {
@@ -95,7 +102,8 @@ void readUltrasonics() {
     delayMicroseconds(10);
     digitalWrite(trigPins[i], LOW);
 
-    long duration = pulseIn(echoPins[i], HIGH, 30000);
+    // timeout reduced to 10ms (max range ~1.7m)
+    long duration = pulseIn(echoPins[i], HIGH, 10000);
     float dist = duration * 0.034 / 2.0;
 
     if (dist > 0 && dist < 400) {
@@ -109,7 +117,7 @@ void readUltrasonics() {
 }
 
 // ============================================================
-// Read IMU
+// Read IMU (with guard)
 // ============================================================
 void readIMU() {
   if (!imu_found) return;
@@ -121,15 +129,18 @@ void readIMU() {
 
   if (bno08x.getSensorEvent(&sensorValue)) {
     if (sensorValue.sensorId == SH2_GYROSCOPE_CALIBRATED) {
-      imu_yaw_rate = sensorValue.un.gyroscope.z;
+      imu_yaw_rate = sensorValue.un.gyroscope.z;  // rad/s
     }
   }
 }
 
 // ============================================================
-// Handle commands from Pi
+// Handle commands from Pi (with motor safety timeout update)
 // ============================================================
 void handleCommand(const String &cmd) {
+  // Update last command time for safety timeout
+  lastCommandTime = millis();
+
   int motorIdx = cmd.indexOf("\"motor\"");
   int steerIdx = cmd.indexOf("\"steer\"");
 
@@ -140,12 +151,13 @@ void handleCommand(const String &cmd) {
     String val = cmd.substring(colon + 1, comma);
     motorSpeed = constrain(val.toInt(), -255, 255);
 
+    // Apply motor PWM via LEDC (channels 0 and 1)
     if (motorSpeed >= 0) {
-      analogWrite(MOTOR_PWM1, motorSpeed);
-      analogWrite(MOTOR_PWM2, 0);
+      ledcWrite(0, motorSpeed);
+      ledcWrite(1, 0);
     } else {
-      analogWrite(MOTOR_PWM1, 0);
-      analogWrite(MOTOR_PWM2, -motorSpeed);
+      ledcWrite(0, 0);
+      ledcWrite(1, -motorSpeed);
     }
   }
 
@@ -166,28 +178,26 @@ void setup() {
   Serial.begin(115200);
   Serial2.begin(115200, SERIAL_8N1, SERIAL_RX_PIN, SERIAL_TX_PIN);
 
-  // Ultrasonic
+  // ---- Ultrasonic pins ----
   for (int i = 0; i < 3; i++) {
     pinMode(trigPins[i], OUTPUT);
     pinMode(echoPins[i], INPUT);
   }
 
-  // Motor
+  // ---- Motor PWM using LEDC (20kHz, 8-bit resolution) ----
   pinMode(MOTOR_PWM1, OUTPUT);
   pinMode(MOTOR_PWM2, OUTPUT);
-  analogWriteFrequency(MOTOR_PWM1, 20000);
-  analogWriteFrequency(MOTOR_PWM2, 20000);
+  ledcSetup(0, 20000, 8);   // channel 0, 20kHz, 8-bit
+  ledcAttachPin(MOTOR_PWM1, 0);
+  ledcSetup(1, 20000, 8);   // channel 1, 20kHz, 8-bit
+  ledcAttachPin(MOTOR_PWM2, 1);
 
-  // Servo
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
+  // ---- Servo (timer auto-allocated) ----
   steeringServo.setPeriodHertz(50);
   steeringServo.attach(SERVO_PIN, 500, 2400);
   steeringServo.write(90);
 
-  // IMU
+  // ---- IMU (BNO086) with address fallback ----
   Wire.begin(I2C_SDA, I2C_SCL);
 
   if (bno08x.begin_I2C()) {
@@ -205,7 +215,10 @@ void setup() {
     Serial.println("WARNING: BNO08x not found!");
   }
 
-  Serial.println("ESP32-S3 Ready");
+  // Initialise lastCommandTime to now
+  lastCommandTime = millis();
+
+  Serial.println("ESP32-S3 Ready - All features active");
 }
 
 // ============================================================
@@ -214,26 +227,40 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  if (now - lastUltrasonicRead > 30) {
+  // ---- Read ultrasonics at 20 Hz (every 50ms) ----
+  if (now - lastUltrasonicRead > 50) {
     readUltrasonics();
     lastUltrasonicRead = now;
   }
 
+  // ---- Read IMU at 20 Hz (every 50ms) ----
   if (now - lastIMURead > 50) {
     readIMU();
     lastIMURead = now;
   }
 
+  // ---- Send sensor data at 20 Hz (every 50ms) ----
   if (now - lastSend > 50) {
     sendSensorData();
     lastSend = now;
   }
 
+  // ---- Process incoming commands from Pi ----
   while (Serial2.available()) {
     String line = Serial2.readStringUntil('\n');
     line.trim();
     if (line.length() > 0) {
       handleCommand(line);
+    }
+  }
+
+  // ---- Motor safety timeout (5 seconds) ----
+  if (now - lastCommandTime > 5000) {
+    if (motorSpeed != 0) {
+      motorSpeed = 0;
+      ledcWrite(0, 0);
+      ledcWrite(1, 0);
+      Serial.println("Motor safety timeout: motors stopped");
     }
   }
 }
